@@ -170,13 +170,4 @@ jobs:
           payload: '{"text":"LFN governance run finished – see issue for details"}'
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        if: env.SLACK_WEBHOOK
-        uses: slackapi/slack-github-action@v1.25.0
-        with:
-          payload: '{"text":"LFN governance run finished – see issue for details"}'
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
-# ----------------------------------------------------------------------------
-#  No external helper scripts required anymore.
-# ----------------------------------------------------------------------------
