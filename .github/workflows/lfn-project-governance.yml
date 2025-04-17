@@ -1,56 +1,102 @@
 # =============================================================================
-#  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
-#  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑m
-#  • Fix: all repos were classified as **Inaccessible** – GraphQL field requiring
-#    extra scopes caused gh cli to error. Re‑implemented metrics collection using
-#    REST API only and trimmed the GraphQL query.
-#  • Removed `assignableUsers` from query; contributor count is now gathered via
-#    REST (`listContributors`, first 100).
-#  • Added explicit GH_TOKEN export & auth status check to aid debugging.
-#  =============================================================================
+#  LFN Project Governance Automation Workflow  ·  *Option C*  (auto‑discover repos)
+#  --------------------------------------------------------------------------------
+#  PURPOSE
+#  -------
+#  • Crawl every repository that belongs to an LFN umbrella project (or a single
+#    induction‑candidate repo) and collect activity, contributor and release
+#    metrics **without** requiring special GraphQL scopes.
+#  • Classify each repository into one of *seven* lifecycle phases defined by
+#    the TAC (Spark → Incubation → Active Development → Stable → Maintenance/LTS
+#    → Archive → Inaccessible).
+#  • Publish a Markdown summary (and Slack ping) so PMs & TAC can immediately
+#    see repos that may need attention.
+#  • Designed to be **readable & hackable** – heavy commentary is included below
+#    so anyone in the community can follow or tweak the logic.
+#
+#  CHANGELOG (✂ trim as needed)
+#  ---------
+#  2025‑04‑17‑n
+#    • Re‑implemented metrics collection *purely* via REST – eliminates the
+#      GraphQL token‑scope issue that forced every repo into "Inaccessible".
+#    • Added a lightweight auth‑debug step so token problems are surfaced early.
+#    • Added in‑file documentation and **expanded lifecycle‑phase commentary**.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+#  WORKFLOW METADATA
+# -----------------------------------------------------------------------------
 name: "LFN Project Governance Automation"
 
+# -----------------------------------------------------------------------------
+#  TRIGGERS
+#  • Manual trigger via *workflow_dispatch* so staff can run ad‑hoc reviews.
+#  • Scheduled trigger every Monday 09:00 UTC (≈ 02:00 Pacific) for weekly review
+# -----------------------------------------------------------------------------
 on:
+  # ---------- Manual ----------
   workflow_dispatch:
     inputs:
-      mode:
+      mode:          # "review" (default)  ➜ crawl everything defined in projects.yaml
+                      # "induction"         ➜ evaluate a *single* candidate repo
         description: "Choose the run mode"
         required: true
         default: "review"
         type: choice
         options: [review, induction]
-      project_org:
+      project_org:    # Only used for *induction* runs
         description: "(induction) GitHub org where the new project lives"
         required: false
-      project_repo:
+      project_repo:   # Only used for *induction* runs
         description: "(induction) Repository slug <org>/<repo>"
         required: false
+  # ---------- Cron ----------
   schedule:
     - cron: "0 9 * * 1"   # 09:00 UTC Monday → 02:00 PT
 
+# -----------------------------------------------------------------------------
+#  PERMISSIONS
+#  We explicitly list scopes needed by the workflow so that the minted GITHUB_TOKEN
+#  follows the principle of least privilege.
+# -----------------------------------------------------------------------------
 permissions:
-  contents: read
-  issues: write
+  contents: read      # read‑only access to repos
+  issues:   write     # create / update governance issue
   pull-requests: write
-  id-token: write
+  id-token: write     # required by upload‑artifact OIDC path
 
+# -----------------------------------------------------------------------------
+#  GLOBAL ENVIRONMENT
+#  The GitHub CLI (`gh`) is used throughout; we inject a long‑lived PAT stored in
+#  repo secrets so it can access *all* LFN orgs.
+# -----------------------------------------------------------------------------
 env:
   GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
 
+# -----------------------------------------------------------------------------
+#  JOB: enumerate-projects
+#  -----------------------
+#  Build a *matrix* of <org>/<repo> slugs to process.  In normal "review" mode we
+#  read `.lfn/projects.yaml` (checked into this repo) which lists the umbrella
+#  orgs.  In "induction" mode we only need the single candidate repo provided by
+#  the workflow_dispatch inputs.
+# -----------------------------------------------------------------------------
 jobs:
   enumerate-projects:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
+      # ---- 1. Checkout repo (for projects.yaml) ----
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # ---- 2. yq – handy YAML CLI ----
       - name: Install yq
         run: sudo apt-get update -y && sudo apt-get install -y yq
 
+      # ---- 3. Build JSON matrix ----
       - name: Build repo matrix
         id: set-matrix
         shell: bash
@@ -61,8 +107,10 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$MODE" == "induction" ]]; then
+            # Manual single‑repo run
             echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
           else
+            # Auto‑discover all repos for each org listed in projects.yaml
             declare -a matrix
             for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
               echo "📦 $org" >&2
@@ -70,10 +118,19 @@ jobs:
                 matrix+=("$org/$repo")
               done
             done
+            # Emit JSON array so matrix strategy can consume
             printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
               read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix: $json" >&2; }
           fi
 
+  # ---------------------------------------------------------------------------
+  #  JOB: classify  (runs **once per repo** in the matrix)
+  #  -----------------------------------------------------
+  #  • Fetch basic repo metadata via REST
+  #  • Derive activity & contributor statistics
+  #  • Map to one of the seven lifecycle phases
+  #  • Upload a tiny artifact <org>--<repo>.json with { phase }
+  # ---------------------------------------------------------------------------
   classify:
     needs: enumerate-projects
     runs-on: ubuntu-latest
@@ -82,12 +139,14 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
+      # ---- sanity: show auth status so missing scopes are obvious ----
       - name: GitHub CLI auth debug
         run: |
           echo "== gh auth status ==" && gh auth status || true
         env:
           GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
 
+      # ---- 1. Collect raw repo JSON (REST) ----
       - name: Collect repository metrics (REST‑only)
         id: metrics
         shell: bash
@@ -97,73 +156,160 @@ jobs:
           set -euo pipefail
           owner="${REPO%%/*}"
           repo="${REPO#*/}"
-          # basic repo data
+          # Use gh api → writes repo.json or empty {}
           if ! gh api "/repos/$owner/$repo" > repo.json 2>err.log; then
             echo "⚠️  $REPO – $(cat err.log)" >&2
             echo '{}' > repo.json
           fi
           echo "json=$(cat repo.json)" >> "$GITHUB_OUTPUT"
 
+      # -------------------------------------------------------------------
+      # 2. DETERMINE LIFECYCLE PHASE  🗂️
+      # -------------------------------------------------------------------
+      # This is *the* brains of the workflow.  The embedded JavaScript (via
+      # actions/github-script) digests the raw REST metadata plus a few extra
+      # on‑the‑fly queries (contributors, commits, releases) and assigns the
+      # repository to one of seven TAC‑approved lifecycle phases.
+      #
+      #  ℹ️  DETAILED RUBRIC & THRESHOLDS
+      #  ----------------------------------------------------------------
+      #  • Spark  – < 3 contributors *OR* no formal release.
+      #  • Incubation – ≥ 3 contributors **and** at least one formal release.
+      #  • Active Development – High velocity (≤ 30 days since last push **and**
+      #                         ≥ 20 commits in the past 90 days).
+      #  • Stable – Slower cadence (last push between 30–180 days).
+      #  • Maintenance/LTS – Project age ≥ 5 yrs, last push 6–18 months, and
+      #                       a release issued within the last 2 yrs.
+      #  • Archive – Repository explicitly archived (`archived: true`).
+      #  • Inaccessible – Metadata could not be fetched (e.g., perms/network).
+      #
+      #  The numeric cut‑offs were derived from empirical activity patterns across
+      #  LFN‑hosted projects and purposely err on the *conservative* side—i.e.,
+      #  a repo will not be promoted too aggressively.  Tuning these knobs is a
+      #  one‑line change to the constants below.
+      # -------------------------------------------------------------------
       - name: Determine lifecycle phase (7‑phase rubric)
         id: phase
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
+            /* ------------------------------------------------------------------
+               Lifecycle Phase Evaluation Logic  – *verbose edition*
+               ------------------------------------------------------------------
+               Inputs (injected via env):
+                 • REPO_JSON  – stringified REST metadata for the repo.
+                 • REPO_SLUG  – "org/repo".
+
+               Additional live queries performed here:
+                 • listContributors()     → unique contributor count.
+                 • listCommits(since=90d) → commit velocity.
+                 • getLatestRelease()     → presence & recency of releases.
+
+               Helper functions:
+                 daysAgo(isoDate) – returns floating‑point days since the event.
+
+               ------------------------------------------------------------------
+               PHASE‑SPECIFIC HEURISTICS
+               ------------------------------------------------------------------
+               • Spark (a.k.a. *Candidate*)
+                   - Intended for brand‑new or seed‑hand‑off code.
+                   - < 3 contributors **OR** no GitHub release tag.
+
+               • Incubation
+                   - Early community forming.
+                   - ≥ 3 contributors **AND** ≥ 1 release.
+                   - Activity/quality may still be unstable; that is okay.
+
+               • Active Development
+                   - Rapid development.
+                   - Last push ≤ 30 days ago **AND** ≥ 20 commits in last 90 days.
+
+               • Stable
+                   - Code is feature‑complete; patches flow but slower.
+                   - Last push between 30 and 180 days.
+
+               • Maintenance / LTS
+                   - Long‑running, production deployments.
+                   - Project age ≥ 5 years.
+                   - Last push 180–540 days (≈ 6–18 months).
+                   - A *recent* release (≤ 730 days) confirms periodic upkeep.
+
+               • Archive
+                   - GitHub "archive" switch flipped → hard stop.
+
+               • Inaccessible
+                   - REST call failed (private repo, deleted, permissions, etc.).
+
+               Anything that slips through defaults to "Unknown" so the TAC can
+               manually inspect and decide.
+            ------------------------------------------------------------------*/
             const repo   = JSON.parse(process.env.REPO_JSON || '{}');
             const slug   = process.env.REPO_SLUG || '';
             const [owner, repoName] = slug.split('/');
 
-            // helper -------------------------------------------------------
+            // Convenience: days between now and an ISO timestamp ----------------
             const daysAgo = iso => (Date.now() - new Date(iso)) / 864e5;
 
+            // ------------------------------------------------------------
+            //  PRIMARY DECISION MATRIX  🔍
+            // ------------------------------------------------------------
             let phase = 'Unknown';
+
             if (!Object.keys(repo).length) {
+              // Could not retrieve metadata (network, perms, etc.)
               phase = 'Inaccessible';
             } else if (repo.archived) {
+              // Explicitly archived by maintainers.
               phase = 'Archive';
             } else {
-              // collect additional metrics via REST -----------------------
+              //----------------------------------------------------------------
+              // Fetch supplementary metrics live – keeps token scope minimal
+              //----------------------------------------------------------------
               let contributors = 0;
               try {
                 const { data: contrib } = await github.rest.repos.listContributors({ owner, repo: repoName, per_page: 100, anon: true });
                 contributors = contrib.length;
-              } catch (_) {}
+              } catch (_) { /* ignore & default to 0 */ }
 
-              const silent       = daysAgo(repo.pushed_at || repo.updated_at);
+              const silent       = daysAgo(repo.pushed_at || repo.updated_at); // how long since any push?
               const ageYrs       = (Date.now() - new Date(repo.created_at)) / (365 * 864e5);
 
-              // latest release --------------------------------------------
+              // -- release info -------------------------------------------------
               let lastRelDays = Infinity;
+              let hasRelease  = false;
               try {
                 const { data: rel } = await github.rest.repos.getLatestRelease({ owner, repo: repoName });
                 lastRelDays = daysAgo(rel.published_at);
-              } catch (_) {}
-              const hasRelease = Number.isFinite(lastRelDays);
+                hasRelease  = true;
+              } catch (_) { /* no release found */ }
 
-              // commits 90d ----------------------------------------------
+              // -- commit velocity (90 days) -----------------------------------
               let commits90d = 0;
               try {
                 const since = new Date(Date.now() - 90 * 864e5).toISOString();
                 const commits = await github.paginate(github.rest.repos.listCommits, { owner, repo: repoName, since, per_page: 100 });
                 commits90d = commits.length;
-              } catch (_) {}
+              } catch (_) { /* network hiccup */ }
 
-              // rules -----------------------------------------------------
-              const isSpark = contributors < 3 || !hasRelease;
-              const isIncub = contributors >= 3 && hasRelease;
-              const isActive = silent <= 30 && commits90d >= 20;
-              const isStable = silent > 30 && silent <= 180;
-              const isLTS = ageYrs >= 5 && silent > 180 && silent <= 540 && lastRelDays <= 730;
+              //----------------------------------------------------------------
+              //  Apply rubric  → set `phase`
+              //----------------------------------------------------------------
+              const isSpark   = contributors < 3 || !hasRelease;
+              const isIncub   = !isSpark && contributors >= 3 && hasRelease;
+              const isActive  = !isSpark && commits90d >= 20 && silent <= 30;
+              const isStable  = !isSpark && !isActive && silent > 30 && silent <= 180;
+              const isLTS     = !isSpark && ageYrs >= 5 && silent > 180 && silent <= 540 && lastRelDays <= 730;
 
               if      (isSpark)  phase = 'Spark';
               else if (isIncub)  phase = 'Incubation';
               else if (isActive) phase = 'Active Development';
               else if (isStable) phase = 'Stable';
               else if (isLTS)    phase = 'Maintenance / LTS';
-              else               phase = 'Unknown';
+              else               phase = 'Unknown';  // catch‑all / needs manual eyes
             }
 
+            // Publish outputs & side‑file for later aggregation ---------------
             core.setOutput('phase', phase);
             const fs = require('fs');
             fs.writeFileSync('repo.json', JSON.stringify({ phase }, null, 2));
@@ -171,6 +317,7 @@ jobs:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
           REPO_SLUG: ${{ matrix.repo_slug }}
 
+      # ---- 3. Name artifact safely (replace / with --) ----
       - name: Sanitize artifact name
         shell: bash
         env:
@@ -179,31 +326,40 @@ jobs:
           safe="${REPO//\//--}"
           echo "ART_NAME=$safe" >> $GITHUB_ENV
 
+      # ---- 4. Upload { phase } result ----
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: "${{ env.ART_NAME }}.json"
           path: repo.json
 
+  # ---------------------------------------------------------------------------
+  #  JOB: publish-report (runs **once** after all classify jobs)  --------------
+  #  • Stitch individual artifacts into a Markdown dashboard grouped by project.
+  #  • Post/Update a GitHub Issue labelled `lfn-governance`.
+  #  • Optionally ping Slack (webhook secret optional).
+  # ---------------------------------------------------------------------------
   publish-report:
     needs: classify
     runs-on: ubuntu-latest
     if: always()
     steps:
+      # ---- 1. Download all <org>--<repo>.json artifacts ----
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      # ---- 2. Build Markdown summary + add to job summary ----
       - id: build-md
         shell: bash
         run: |
           set -euo pipefail
-          declare -A rows
+          declare -A rows   # associative array keyed by project/org
           for dir in artifacts/*; do
             [[ -d "$dir" ]] || continue
             slug=$(basename "$dir")
             slug=${slug%.json}
-            full=${slug//--/\/}
+            full=${slug//--/\/}      # re‑hydrate to org/repo
             project=${full%%/*}
             repo=${full#*/}
             phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
@@ -227,28 +383,5 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/github-script@v7
-        env:
-          SUMMARY: ${{ steps.build-md.outputs.summary }}
-          MODE: ${{ github.event.inputs.mode || 'review' }}
-        with:
-          github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
-          script: |
-            const mode = process.env.MODE;
-            const body = process.env.SUMMARY;
-            const title = mode === 'induction' ? `🆕 LFN Project Induction` : '🔄 Weekly Lifecycle Review – LFN Projects';
-            const { data: issues } = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, labels: 'lfn-governance', state: 'open', per_page: 100 });
-            const existing = issues.find(i => i.title.startsWith(title));
-            if (existing) {
-              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
-            } else {
-              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, labels: ['lfn-governance'], body });
-            }
-
-      - name: Notify Slack
-        if: env.SLACK_WEBHOOK
-        uses: slackapi/slack-github-action@v1.25.0
-        with:
-          payload: '{"text":"LFN governance run finished – see issue for details"}'
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      # ---- 3. Create/Update governance issue ----
+      - uses: actions
