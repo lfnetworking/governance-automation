@@ -1,7 +1,8 @@
 # ----------------------------------------------------------------------------
-#  .github/scripts/lifecycle.ts  (pseudo‑code snippet)
+#  .github/scripts/lifecycle.ts  (pseudo‑code snippet – unchanged)
 # ----------------------------------------------------------------------------
 #  export function classify(repo: RepoMetadata): LifecyclePhase {
+#    /* … */ }
 #    /*
 #     * Heuristic thresholds (tune as needed):
 #     * – Spark: < 3 contributors, no release tags
@@ -11,4 +12,4 @@
 #     * – Maintenance: no feature commits in 6 months but security patches < 90 days
 #     * – Deprecation: EOL notice in repo or "deprecated" in README
 #     * – Archive: repo archived flag == true
-#     */   }
+#     */  
