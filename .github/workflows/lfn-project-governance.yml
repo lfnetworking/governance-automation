@@ -1,10 +1,10 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑c
-#  • Fixed “Invalid format ...” error: matrix JSON now written *compact &
-#    newline‑free* to $GITHUB_OUTPUT.  GitHub expects a single‑line value.
-#  • Simplified matrix build: stop double‑quoting items; let jq handle it.
+#  CHANGELOG 2025‑04‑17‑e
+#  • Added fault‑tolerant wrapper around `gh repo view` in the *classify* job.
+#    When a repo is private/archived/missing, we log a warning, drop an empty
+#    `{}` placeholder, and continue—so one bad repo no longer fails the matrix.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -36,9 +36,6 @@ env:
   GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}   # Auth for all gh CLI calls
 
 jobs:
-  # -------------------------------------------------------------------------
-  # 1) Enumerate every repo in each listed organisation (or single induction)
-  # -------------------------------------------------------------------------
   enumerate-projects:
     runs-on: ubuntu-latest
     outputs:
@@ -62,7 +59,6 @@ jobs:
           PROJECT_REPO: ${{ github.event.inputs.project_repo }}
         run: |
           set -euo pipefail
-
           if [[ "$MODE" == "induction" ]]; then
             matrix_json="[\"${PROJECT_ORG}/${PROJECT_REPO}\"]"
           else
@@ -73,16 +69,11 @@ jobs:
                 matrix+=("$org/$repo")
               done < <(gh repo list "$org" --json name -q '.[].name')
             done
-            # Convert bash array → compact JSON array in one go
             matrix_json=$(printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs .)
           fi
-
           echo "Matrix JSON: $matrix_json" >&2
           echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
 
-  # -------------------------------------------------------------------------
-  # 2) Gather stats & classify each project (matrix job)
-  # -------------------------------------------------------------------------
   classify:
     needs: enumerate-projects
     runs-on: ubuntu-latest
@@ -90,16 +81,19 @@ jobs:
       fail-fast: false
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
-
     steps:
-      - name: 🔍  Collect repository metrics
+      - name: 🔍  Collect repository metrics (tolerant)
         id: metrics
         shell: bash
         env:
           REPO: ${{ matrix.repo_slug }}
         run: |
           set -euo pipefail
-          gh repo view "$REPO" --json nameWithOwner,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,refs,releases,pushedAt > repo.json
+          fields="nameWithOwner,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,releases,pushedAt"
+          if ! gh repo view "$REPO" --json "$fields" > repo.json 2>err.log; then
+            echo "⚠️  Skipping $REPO – $(cat err.log)" >&2
+            echo '{}' > repo.json
+          fi
           echo "json=$(cat repo.json)" >> "$GITHUB_OUTPUT"
 
       - name: 🧮  Classify lifecycle phase
@@ -120,9 +114,6 @@ jobs:
           name: "${{ matrix.repo_slug }}.json"
           path: repo.json
 
-  # -------------------------------------------------------------------------
-  # 3) Aggregate results & open / update a governance issue
-  # -------------------------------------------------------------------------
   publish-report:
     needs: classify
     runs-on: ubuntu-latest
@@ -151,7 +142,6 @@ jobs:
             const title = mode === 'induction'
               ? `🆕 LFN Project Induction – ${process.env.PROJECT_REPO}`
               : '🔄 Weekly Lifecycle Review – LFN Projects';
-
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -182,9 +172,7 @@ jobs:
         uses: slackapi/slack-github-action@v1.25.0
         with:
           payload: |
-            {
-              "text": "LFN governance run finished – see issue for details"
-            }
+            { "text": "LFN governance run finished – see issue for details" }
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
