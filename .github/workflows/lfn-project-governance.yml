@@ -1,11 +1,11 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑h
-#  • Fix summary output quoting so the full Markdown table reaches the Issue body
-#    (EOFM delimiter must be un‑quoted).
-#  • Pipe summary into $GITHUB_STEP_SUMMARY so the roll‑up is visible right in
-#    the run’s “Summary” tab as well.
+#  CHANGELOG 2025‑04‑17‑i
+#  • Fix summary table again – use the **artifact folder name** (org--repo) so the
+#    real repository slug shows up instead of the literal word “repo”.
+#  • Group results by top‑level **Project/Org** and emit a separate table for each
+#    (Nephio, FDio, ONAP, …) so it’s easier to scan.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -144,26 +144,45 @@ jobs:
         with:
           path: artifacts
 
-      # Build markdown summary without external script
+      # ----------------------------------------------------------------------
+      # Build Markdown summary grouped by *Project Org* ----------------------
+      # ----------------------------------------------------------------------
       - id: build-md
         shell: bash
         run: |
           set -euo pipefail
-          echo "| Repository | Phase |" > summary.md
-          echo "|------------|-------|" >> summary.md
-          for f in artifacts/*/*.json; do
-            repo=$(basename "${f%.json}")
-            orig=${repo//--/\/}
-            phase=$(jq -r '.phase // "Unknown"' "$f" 2>/dev/null || echo "Unknown")
-            echo "| $orig | $phase |" >> summary.md
+
+          declare -A rows  # associative array keyed by project → accumulated rows
+
+          for dir in artifacts/*; do
+            [[ -d "$dir" ]] || continue
+            slug=$(basename "$dir")             # org--repo
+            full=${slug//--/\/}                 # → org/repo
+            project=${full%%/*}                  # org
+            repo=${full#*/}                      # repository name
+            phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
+            rows[$project]+=$'\n'"| $repo | $phase |"
           done
-          # export as step output (multi‑line) – *EOF delimiter must be UN‑quoted*
+
+          {
+            echo "# LFN Project Lifecycle Summary"
+            for project in "${!rows[@]}"; do
+              echo
+              echo "## $project"
+              echo "| Repository | Phase |"
+              echo "|------------|-------|"
+              # print rows for this project, sorted alphabetically by repository
+              printf '%s\n' "${rows[$project]}" | sort
+            done
+          } > summary.md
+
+          # Expose as step output and to run summary
           {
             echo 'summary<<EOF'
             cat summary.md
             echo EOF
           } >> "$GITHUB_OUTPUT"
-          # and surface directly in the run summary UI
+
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/github-script@v7
