@@ -1,22 +1,11 @@
-projects:
-  - org: Nephio
-    repo: https://github.com/nephio-project/
-  - org: FD.io
-    repo: https://github.com/FDio/
-  - org: OpenDaylight
-    repo: https://github.com/opendaylight/
-  - org: ONAP
-    repo: https://github.com/onap/
-  - org: Anuket
-    repo: https://github.com/opnfv/
-  - org: 5GSBP
-    repo: https://github.com/5G-Super-Blue-Print
-  - org: CNTi
-    repo: https://github.com/lfn-cnti
-  - org: L3AF
-    repo: https://github.com/l3af-project
-  - org: Paraglider
-    repo: https://github.com/paraglider-project/paraglider
-  - org: Essedum
-    repo: https://github.com/essedum-project
- 
+orgs:
+  - nephio-project
+  - FDio
+  - opendaylight
+  - onap
+  - opnfv               # Anuket lives here
+  - 5G-Super-Blue-Print
+  - lfn-cnti
+  - l3af-project
+  - paraglider-project
+  - essedum-project
