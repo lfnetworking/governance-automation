@@ -1,0 +1,233 @@
+# =============================================================================
+#  LFN Project Governance Automation Workflow
+#  ------------------------------------------
+#  This workflow unifies two related automation tracks:
+#    1) **Project Induction** – when a *new* project applies to join Linux
+#       Foundation Networking (LFN)
+#    2) **Lifecycle Review** – a periodic health check of *existing* LFN
+#       projects that live in **other** GitHub organisations (e.g. `nephio-*
+#       org`, `fdio`, `opendaylight`)
+#
+#  The workflow is intentionally lightweight: everything runs in‑repo using
+#  `actions/github-script` + the GitHub CLI so you don’t need external servers.
+#  Classification rules ("spark", "incubation", … "archive") are implemented in
+#  a single TypeScript module (`.github/scripts/lifecycle.ts`) so criteria can
+#  evolve without touching YAML.
+#
+#  ---------------------------------------------------------------------------
+#  **Secrets / Required Permissions**
+#  ---------------------------------------------------------------------------
+#  – `LFN_ADMIN_TOKEN` • PAT from an LFN admin with `repo`, `org:read`,
+#    `workflow`, `issues`, and `project` scopes **across all target orgs**.
+#  – `SLACK_WEBHOOK`   • Optional, for posting results to #lfn-gov‑bot
+#
+#  NOTE: Make sure the token is also granted "Repository Access → All
+#  repositories" inside each external organisation that hosts an LFN project.
+# =============================================================================
+name: "LFN Project Governance Automation"
+
+on:
+  # -------- Manual trigger ---------------------------------------------------
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose the run mode"
+        required: true
+        default: "review"
+        type: choice
+        options:
+          - review      # Weekly lifecycle review
+          - induction   # One‑off induction run for a single project
+      project_org:
+        description: "(induction) GitHub org where the new project lives"
+        required: false
+      project_repo:
+        description: "(induction) Repository slug <org>/<repo> OR list in YAML"
+        required: false
+      contact_email:
+        description: "(induction) Primary contact e‑mail for notifications"
+        required: false
+  # -------- Scheduled health check ------------------------------------------
+  schedule:
+    - cron: "0 9 * * 1"   # 09:00 UTC every Monday → 02:00 PT
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1) Build the matrix of projects we need to handle in this run
+  # -------------------------------------------------------------------------
+  enumerate-projects:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout meta‑repo
+        uses: actions/checkout@v4
+        with:
+          # Shallow because we only need the YAML inventory file
+          fetch-depth: 1
+
+      - name: Read projects inventory
+        id: set-matrix
+        shell: bash
+        env:
+          MODE: ${{ github.event.inputs.mode || 'review' }}
+          PROJECT_ORG: ${{ github.event.inputs.project_org }}
+          PROJECT_REPO: ${{ github.event.inputs.project_repo }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$MODE" == "induction" ]]; then
+            # Single‑project run: build JSON with one element
+            echo "[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" > matrix.json
+          else
+            # Default weekly review: load the master list of active projects
+            # The file lives in this repo at `.lfn/projects.yaml`
+            yq -o=json '.projects | map(.org + "/" + .repo)' .lfn/projects.yaml > matrix.json
+          fi
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------------
+  # 2) Gather stats & classify each project (matrix job)
+  # -------------------------------------------------------------------------
+  classify:
+    needs: enumerate-projects
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
+
+    steps:
+      - name: ⬇️  Setup GitHub CLI
+        uses: cli/cli-action@v2
+        with:
+          # Use the LFN admin token that can access external orgs
+          token: ${{ secrets.LFN_ADMIN_TOKEN }}
+
+      - name: 🔍  Collect repository metrics
+        id: metrics
+        shell: bash
+        env:
+          REPO: ${{ matrix.repo_slug }}
+        run: |
+          set -euo pipefail
+          gh repo view "$REPO" --json nameWithOwner,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,refs,releases,pushedAt > repo.json
+          echo "json=$(cat repo.json)" >> "$GITHUB_OUTPUT"
+
+      - name: 🧮  Classify lifecycle phase
+        id: phase
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
+          script: |
+            const data = JSON.parse(process.env.REPO_JSON || '{}');
+            const classify = require('./.github/scripts/lifecycle');
+            const phase = classify(data);
+            core.setOutput('phase', phase);
+        env:
+          REPO_JSON: ${{ steps.metrics.outputs.json }}
+
+      - name: ⬆️  Upload per‑project result
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ matrix.repo_slug }}.json"
+          path: repo.json
+
+  # -------------------------------------------------------------------------
+  # 3) Aggregate results & open / update a governance issue
+  # -------------------------------------------------------------------------
+  publish-report:
+    needs: classify
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all project artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 📊  Build markdown summary
+        id: build-md
+        run: |
+          node .github/scripts/build-summary.js artifacts > summary.md
+          echo "summary<<EOF" >> "$GITHUB_OUTPUT"
+          cat summary.md >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: ✏️  Create or update tracking issue
+        uses: actions/github-script@v7
+        env:
+          SUMMARY: ${{ steps.build-md.outputs.summary }}
+          MODE: ${{ github.event.inputs.mode || 'review' }}
+        with:
+          github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
+          script: |
+            const mode = process.env.MODE;
+            const summary = process.env.SUMMARY;
+            const title = mode === 'induction'
+              ? `🆕 LFN Project Induction – ${process.env.PROJECT_REPO}`
+              : '🔄 Weekly Lifecycle Review – LFN Projects';
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'lfn-governance',
+              state: 'open',
+              per_page: 100,
+            });
+            let issue = issues.find(i => i.title.startsWith(title));
+            if (issue) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: summary,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                labels: ['lfn-governance'],
+                body: summary,
+              });
+            }
+
+      - name: 💬  (Optional) Notify Slack
+        if: env.SLACK_WEBHOOK != ''
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "attachments": [
+                {
+                  "color": "#36a64f",
+                  "pretext": "LFN Governance Bot",
+                  "text": "${{ github.job }} completed → <${{ steps.context.outputs.url }}|view report>",
+                  "mrkdwn_in": ["text", "pretext"]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
+# ----------------------------------------------------------------------------
+#  .github/scripts/lifecycle.ts  (pseudo‑code snippet)
+# ----------------------------------------------------------------------------
+#  export function classify(repo: RepoMetadata): LifecyclePhase {
+#    /*
+#     * Heuristic thresholds (tune as needed):
+#     * – Spark: < 3 contributors, no release tags
+#     * – Incubation: ≥ 3 contributors, < 1 tagged release, project age < 6 months
+#     * – Active Development: ≥ 10 commits in past 90 days & ≥ 1 release
+#     * – Stable: commits in past 6 months < 10 but ≥ 1 release in past year
+#     * – Maintenance: no feature commits in 6 months but security patches < 90 days
+#     * – Deprecation: EOL notice in repo or "deprecated" in README
+#     * – Archive: repo archived flag == true
+#     */   }
