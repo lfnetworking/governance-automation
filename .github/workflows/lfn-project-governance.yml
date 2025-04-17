@@ -151,11 +151,15 @@ jobs:
           echo "|------------|-------|" >> summary.md
           for f in artifacts/*/*.json; do
             repo=$(basename "${f%.json}")
-            orig=${repo//--/\/}   # restore /
+            orig=${repo//--/\/}
             phase=$(jq -r '.phase // "Unknown"' "$f" 2>/dev/null || echo "Unknown")
             echo "| $orig | $phase |" >> summary.md
           done
-          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          {
+            echo "summary<<EOF"
+            cat summary.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           cat summary.md >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT" >> $GITHUB_OUTPUT
           cat summary.md >> $GITHUB_OUTPUT
