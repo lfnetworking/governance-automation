@@ -1,12 +1,12 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17
-#  • Added an explicit GitHub‑CLI setup step *inside* the enumerate‑projects job
-#    so `gh repo list` is available and authenticated before we build the
-#    matrix.  Without this, the CLI wasn’t on `$PATH`, causing an empty matrix.
-#  • Injected `GH_TOKEN=$LFN_ADMIN_TOKEN` so the CLI can see private / internal
-#    repos across external orgs.
+#  CHANGELOG 2025‑04‑17‑b
+#  • Removed non‑existent action `cli/cli-action@v2` (caused “action not found”).
+#  • Rely on GitHub‑hosted runners’ pre‑installed GitHub CLI and set `GH_TOKEN`
+#    env var instead.
+#  • Added a lightweight step to install **yq** (YAML processor) via apt so the
+#    inventory parsing works.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -34,6 +34,9 @@ permissions:
   pull-requests: write
   id-token: write
 
+env:
+  GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}   # Auth for all gh CLI calls
+
 jobs:
   # -------------------------------------------------------------------------
   # 1) Enumerate every repo in each listed organisation (or single induction)
@@ -47,11 +50,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      # NEW: ensure the GitHub CLI is available & authenticated
-      - name: ⬇️  Setup GitHub CLI
-        uses: cli/cli-action@v2
-        with:
-          token: ${{ secrets.LFN_ADMIN_TOKEN }}
+      - name: Install yq (YAML processor)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y yq
 
       - name: Read org inventory & expand to repo list
         id: set-matrix
@@ -60,7 +62,6 @@ jobs:
           MODE: ${{ github.event.inputs.mode || 'review' }}
           PROJECT_ORG: ${{ github.event.inputs.project_org }}
           PROJECT_REPO: ${{ github.event.inputs.project_repo }}
-          GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}    # auth for gh CLI
         run: |
           set -euo pipefail
 
@@ -77,7 +78,6 @@ jobs:
             done
             printf '%s\n' "${matrix[@]}" | jq -s '.' > matrix.json
           fi
-          echo "Matrix=$(cat matrix.json)" >&2
           echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
@@ -92,11 +92,6 @@ jobs:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
 
     steps:
-      - name: ⬇️  Setup GitHub CLI
-        uses: cli/cli-action@v2
-        with:
-          token: ${{ secrets.LFN_ADMIN_TOKEN }}
-
       - name: 🔍  Collect repository metrics
         id: metrics
         shell: bash
