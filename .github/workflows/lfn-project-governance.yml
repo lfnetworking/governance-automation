@@ -1,28 +1,28 @@
 # =============================================================================
-#  LFN Project Governance Automation Workflow
-#  ------------------------------------------
-#  This workflow unifies two related automation tracks:
-#    1) **Project Induction** – when a *new* project applies to join Linux
-#       Foundation Networking (LFN)
-#    2) **Lifecycle Review** – a periodic health check of *existing* LFN
-#       projects that live in **other** GitHub organisations (e.g. `nephio-*
-#       org`, `fdio`, `opendaylight`)
+#  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
+#  ---------------------------------------------------------------------------
+#  This version treats the inventory file `.lfn/projects.yaml` as a simple list
+#  of *GitHub organisations only*.  The workflow enumerates **all** repos in
+#  each org at run‑time via `gh repo list`, so you never have to edit YAML when
+#  projects create or archive repositories.
 #
-#  The workflow is intentionally lightweight: everything runs in‑repo using
-#  `actions/github-script` + the GitHub CLI so you don’t need external servers.
-#  Classification rules ("spark", "incubation", … "archive") are implemented in
-#  a single TypeScript module (`.github/scripts/lifecycle.ts`) so criteria can
-#  evolve without touching YAML.
+#  Inventory example ⟶
+#  -------------------
+#  ```yaml
+#  orgs:
+#    - nephio-project
+#    - FDio
+#    - opendaylight
+#  ```
 #
 #  ---------------------------------------------------------------------------
 #  **Secrets / Required Permissions**
 #  ---------------------------------------------------------------------------
 #  – `LFN_ADMIN_TOKEN` • PAT from an LFN admin with `repo`, `org:read`,
 #    `workflow`, `issues`, and `project` scopes **across all target orgs**.
-#  – `SLACK_WEBHOOK`   • Optional, for posting results to #lfn-gov‑bot
-#
-#  NOTE: Make sure the token is also granted "Repository Access → All
-#  repositories" inside each external organisation that hosts an LFN project.
+#    Must grant *All repositories* access in each external organisation so that
+#    `gh repo list` can see private or archived repos as needed.
+#  – `SLACK_WEBHOOK`   • Optional, for posting results to #lfn-gov‑bot.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -69,10 +69,9 @@ jobs:
       - name: Checkout meta‑repo
         uses: actions/checkout@v4
         with:
-          # Shallow because we only need the YAML inventory file
           fetch-depth: 1
 
-      - name: Read projects inventory
+      - name: Read org inventory & expand to repo list
         id: set-matrix
         shell: bash
         env:
@@ -86,10 +85,18 @@ jobs:
             # Single‑project run: build JSON with one element
             echo "[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" > matrix.json
           else
-            # Default weekly review: load the master list of active projects
-            # The file lives in this repo at `.lfn/projects.yaml`
-            yq -o=json '.projects | map(.org + "/" + .repo)' .lfn/projects.yaml > matrix.json
+            orgs=$(yq -r '.orgs[]' .lfn/projects.yaml)
+            matrix=()
+            for org in $orgs; do
+              echo "📦 Enumerating repos in $org" >&2
+              for repo in $(gh repo list "$org" --json name -q '.[].name'); do
+                matrix+=("\"$org/$repo\"")
+              done
+            done
+            # Dump as a JSON array
+            printf '%s\n' "${matrix[@]}" | jq -s '.' > matrix.json
           fi
+          echo "Matrix=$(cat matrix.json)" >&2
           echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
@@ -107,7 +114,6 @@ jobs:
       - name: ⬇️  Setup GitHub CLI
         uses: cli/cli-action@v2
         with:
-          # Use the LFN admin token that can access external orgs
           token: ${{ secrets.LFN_ADMIN_TOKEN }}
 
       - name: 🔍  Collect repository metrics
@@ -218,16 +224,7 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
 # ----------------------------------------------------------------------------
-#  .github/scripts/lifecycle.ts  (pseudo‑code snippet)
+#  .github/scripts/lifecycle.ts  (pseudo‑code snippet – unchanged)
 # ----------------------------------------------------------------------------
 #  export function classify(repo: RepoMetadata): LifecyclePhase {
-#    /*
-#     * Heuristic thresholds (tune as needed):
-#     * – Spark: < 3 contributors, no release tags
-#     * – Incubation: ≥ 3 contributors, < 1 tagged release, project age < 6 months
-#     * – Active Development: ≥ 10 commits in past 90 days & ≥ 1 release
-#     * – Stable: commits in past 6 months < 10 but ≥ 1 release in past year
-#     * – Maintenance: no feature commits in 6 months but security patches < 90 days
-#     * – Deprecation: EOL notice in repo or "deprecated" in README
-#     * – Archive: repo archived flag == true
-#     */   }
+#    /* … */ }
