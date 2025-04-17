@@ -1,12 +1,10 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑b
-#  • Removed non‑existent action `cli/cli-action@v2` (caused “action not found”).
-#  • Rely on GitHub‑hosted runners’ pre‑installed GitHub CLI and set `GH_TOKEN`
-#    env var instead.
-#  • Added a lightweight step to install **yq** (YAML processor) via apt so the
-#    inventory parsing works.
+#  CHANGELOG 2025‑04‑17‑c
+#  • Fixed “Invalid format ...” error: matrix JSON now written *compact &
+#    newline‑free* to $GITHUB_OUTPUT.  GitHub expects a single‑line value.
+#  • Simplified matrix build: stop double‑quoting items; let jq handle it.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -66,19 +64,21 @@ jobs:
           set -euo pipefail
 
           if [[ "$MODE" == "induction" ]]; then
-            echo "[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" > matrix.json
+            matrix_json="[\"${PROJECT_ORG}/${PROJECT_REPO}\"]"
           else
-            orgs=$(yq -r '.orgs[]' .lfn/projects.yaml)
-            matrix=()
-            for org in $orgs; do
+            declare -a matrix
+            for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
               echo "📦 Enumerating repos in $org" >&2
-              for repo in $(gh repo list "$org" --json name -q '.[].name'); do
-                matrix+=("\"$org/$repo\"")
-              done
+              while read -r repo; do
+                matrix+=("$org/$repo")
+              done < <(gh repo list "$org" --json name -q '.[].name')
             done
-            printf '%s\n' "${matrix[@]}" | jq -s '.' > matrix.json
+            # Convert bash array → compact JSON array in one go
+            matrix_json=$(printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs .)
           fi
-          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+
+          echo "Matrix JSON: $matrix_json" >&2
+          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
   # 2) Gather stats & classify each project (matrix job)
