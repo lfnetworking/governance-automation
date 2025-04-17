@@ -1,33 +1,16 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  This version treats the inventory file `.lfn/projects.yaml` as a simple list
-#  of *GitHub organisations only*.  The workflow enumerates **all** repos in
-#  each org at run‑time via `gh repo list`, so you never have to edit YAML when
-#  projects create or archive repositories.
-#
-#  Inventory example ⟶
-#  -------------------
-#  ```yaml
-#  orgs:
-#    - nephio-project
-#    - FDio
-#    - opendaylight
-#  ```
-#
-#  ---------------------------------------------------------------------------
-#  **Secrets / Required Permissions**
-#  ---------------------------------------------------------------------------
-#  – `LFN_ADMIN_TOKEN` • PAT from an LFN admin with `repo`, `org:read`,
-#    `workflow`, `issues`, and `project` scopes **across all target orgs**.
-#    Must grant *All repositories* access in each external organisation so that
-#    `gh repo list` can see private or archived repos as needed.
-#  – `SLACK_WEBHOOK`   • Optional, for posting results to #lfn-gov‑bot.
+#  CHANGELOG 2025‑04‑17
+#  • Added an explicit GitHub‑CLI setup step *inside* the enumerate‑projects job
+#    so `gh repo list` is available and authenticated before we build the
+#    matrix.  Without this, the CLI wasn’t on `$PATH`, causing an empty matrix.
+#  • Injected `GH_TOKEN=$LFN_ADMIN_TOKEN` so the CLI can see private / internal
+#    repos across external orgs.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
 on:
-  # -------- Manual trigger ---------------------------------------------------
   workflow_dispatch:
     inputs:
       mode:
@@ -35,21 +18,15 @@ on:
         required: true
         default: "review"
         type: choice
-        options:
-          - review      # Weekly lifecycle review
-          - induction   # One‑off induction run for a single project
+        options: [review, induction]
       project_org:
         description: "(induction) GitHub org where the new project lives"
         required: false
       project_repo:
-        description: "(induction) Repository slug <org>/<repo> OR list in YAML"
+        description: "(induction) Repository slug <org>/<repo>"
         required: false
-      contact_email:
-        description: "(induction) Primary contact e‑mail for notifications"
-        required: false
-  # -------- Scheduled health check ------------------------------------------
   schedule:
-    - cron: "0 9 * * 1"   # 09:00 UTC every Monday → 02:00 PT
+    - cron: "0 9 * * 1"   # 09:00 UTC Monday → 02:00 PT
 
 permissions:
   contents: read
@@ -59,17 +36,22 @@ permissions:
 
 jobs:
   # -------------------------------------------------------------------------
-  # 1) Build the matrix of projects we need to handle in this run
+  # 1) Enumerate every repo in each listed organisation (or single induction)
   # -------------------------------------------------------------------------
   enumerate-projects:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Checkout meta‑repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      # NEW: ensure the GitHub CLI is available & authenticated
+      - name: ⬇️  Setup GitHub CLI
+        uses: cli/cli-action@v2
+        with:
+          token: ${{ secrets.LFN_ADMIN_TOKEN }}
 
       - name: Read org inventory & expand to repo list
         id: set-matrix
@@ -78,11 +60,11 @@ jobs:
           MODE: ${{ github.event.inputs.mode || 'review' }}
           PROJECT_ORG: ${{ github.event.inputs.project_org }}
           PROJECT_REPO: ${{ github.event.inputs.project_repo }}
+          GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}    # auth for gh CLI
         run: |
           set -euo pipefail
 
           if [[ "$MODE" == "induction" ]]; then
-            # Single‑project run: build JSON with one element
             echo "[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" > matrix.json
           else
             orgs=$(yq -r '.orgs[]' .lfn/projects.yaml)
@@ -93,7 +75,6 @@ jobs:
                 matrix+=("\"$org/$repo\"")
               done
             done
-            # Dump as a JSON array
             printf '%s\n' "${matrix[@]}" | jq -s '.' > matrix.json
           fi
           echo "Matrix=$(cat matrix.json)" >&2
@@ -134,8 +115,7 @@ jobs:
           script: |
             const data = JSON.parse(process.env.REPO_JSON || '{}');
             const classify = require('./.github/scripts/lifecycle');
-            const phase = classify(data);
-            core.setOutput('phase', phase);
+            core.setOutput('phase', classify(data));
         env:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
 
@@ -153,21 +133,18 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Download all project artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: 📊  Build markdown summary
-        id: build-md
+      - id: build-md
         run: |
           node .github/scripts/build-summary.js artifacts > summary.md
           echo "summary<<EOF" >> "$GITHUB_OUTPUT"
           cat summary.md >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: ✏️  Create or update tracking issue
-        uses: actions/github-script@v7
+      - uses: actions/github-script@v7
         env:
           SUMMARY: ${{ steps.build-md.outputs.summary }}
           MODE: ${{ github.event.inputs.mode || 'review' }}
@@ -175,7 +152,7 @@ jobs:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
             const mode = process.env.MODE;
-            const summary = process.env.SUMMARY;
+            const body = process.env.SUMMARY;
             const title = mode === 'induction'
               ? `🆕 LFN Project Induction – ${process.env.PROJECT_REPO}`
               : '🔄 Weekly Lifecycle Review – LFN Projects';
@@ -187,13 +164,13 @@ jobs:
               state: 'open',
               per_page: 100,
             });
-            let issue = issues.find(i => i.title.startsWith(title));
-            if (issue) {
+            const existing = issues.find(i => i.title.startsWith(title));
+            if (existing) {
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: issue.number,
-                body: summary,
+                issue_number: existing.number,
+                body,
               });
             } else {
               await github.rest.issues.create({
@@ -201,7 +178,7 @@ jobs:
                 repo: context.repo.repo,
                 title,
                 labels: ['lfn-governance'],
-                body: summary,
+                body,
               });
             }
 
@@ -211,20 +188,11 @@ jobs:
         with:
           payload: |
             {
-              "attachments": [
-                {
-                  "color": "#36a64f",
-                  "pretext": "LFN Governance Bot",
-                  "text": "${{ github.job }} completed → <${{ steps.context.outputs.url }}|view report>",
-                  "mrkdwn_in": ["text", "pretext"]
-                }
-              ]
+              "text": "LFN governance run finished – see issue for details"
             }
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
 # ----------------------------------------------------------------------------
-#  .github/scripts/lifecycle.ts  (pseudo‑code snippet – unchanged)
+#  Helper script stubs remain unchanged
 # ----------------------------------------------------------------------------
-#  export function classify(repo: RepoMetadata): LifecyclePhase {
-#    /* … */ }
