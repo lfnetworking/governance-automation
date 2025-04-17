@@ -119,10 +119,18 @@ jobs:
         env:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
 
+      - name: Sanitize artifact name
+        shell: bash
+        env:
+          REPO: ${{ matrix.repo_slug }}
+        run: |
+          safe="${REPO//\//--}"
+          echo "ART_NAME=$safe" >> $GITHUB_ENV
+
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ matrix.repo_slug }}.json"
+          name: "${{ env.ART_NAME }}.json"
           path: repo.json
 
   publish-report:
@@ -143,10 +151,13 @@ jobs:
           echo "|------------|-------|" >> summary.md
           for f in artifacts/*/*.json; do
             repo=$(basename "${f%.json}")
+            orig=${repo//--/\/}   # restore /
             phase=$(jq -r '.phase // "Unknown"' "$f" 2>/dev/null || echo "Unknown")
-            echo "| $repo | $phase |" >> summary.md
+            echo "| $orig | $phase |" >> summary.md
           done
           echo "summary<<EOF" >> $GITHUB_OUTPUT
+          cat summary.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT" >> $GITHUB_OUTPUT
           cat summary.md >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
