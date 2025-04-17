@@ -1,7 +1,8 @@
 # governance-automation
 ## Currently in draft.
 ## Project Status
-
+This currently, there is a GitHub Action that runs weekly that checks LFN projects on a per-repo status as defined in: .github/workflows/lfn-project-governance.yml
+Projects are identified here: .lfn/projects.yaml
 Here are the things we still need to do:
 
 - [x] Set up initial project structure
