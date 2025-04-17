@@ -1,11 +1,9 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑f
-#  • Removed external dependency `.github/scripts/lifecycle`.  Lifecycle phase
-#    calculation is now **embedded inline** in the github‑script block, so you
-#    don’t need to create extra files.
-#  • Added `isArchived` to `gh repo view` field list for accurate phase logic.
+#  CHANGELOG 2025‑04‑17‑g
+#  • Fixed "Identifier 'core' has already been declared" by removing the extra
+#    `const core = require('@actions/core');` inside the github‑script block.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -101,7 +99,6 @@ jobs:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
             const repo = JSON.parse(process.env.REPO_JSON || '{}');
-            const core = require('@actions/core');
             function daysAgo(dt){return (Date.now()-new Date(dt))/(864e5);}  
             let phase='Unknown';
             if(Object.keys(repo).length===0){phase='Inaccessible';}
