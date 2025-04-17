@@ -1,12 +1,12 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑i
-#  • Fix summary table again – use the **artifact folder name** (org--repo) so the
-#    real repository slug shows up instead of the literal word “repo”.
-#  • Group results by top‑level **Project/Org** and emit a separate table for each
-#    (Nephio, FDio, ONAP, …) so it’s easier to scan.
-# =============================================================================
+#  CHANGELOG 2025‑04‑17‑j
+#  • Clean summary table formatting
+#      – strip the trailing “.json” from repo names.
+#      – ensure the first row in each table isn’t preceded by an empty line so
+#        GitHub renders the table correctly.
+#  =============================================================================
 name: "LFN Project Governance Automation"
 
 on:
@@ -156,12 +156,14 @@ jobs:
 
           for dir in artifacts/*; do
             [[ -d "$dir" ]] || continue
-            slug=$(basename "$dir")             # org--repo
-            full=${slug//--/\/}                 # → org/repo
-            project=${full%%/*}                  # org
-            repo=${full#*/}                      # repository name
+            slug=$(basename "$dir")            # org--repo.json
+            slug=${slug%.json}                  # drop .json suffix
+            full=${slug//--/\/}               # → org/repo
+            project=${full%%/*}                 # org
+            repo=${full#*/}                     # repository name
             phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
-            rows[$project]+=$'\n'"| $repo | $phase |"
+            if [[ -n "${rows[$project]:-}" ]]; then rows[$project]+=$'\n'; fi
+            rows[$project]+="| $repo | $phase |"
           done
 
           {
