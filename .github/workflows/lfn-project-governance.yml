@@ -1,11 +1,11 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑j
-#  • Clean summary table formatting
-#      – strip the trailing “.json” from repo names.
-#      – ensure the first row in each table isn’t preceded by an empty line so
-#        GitHub renders the table correctly.
+#  CHANGELOG 2025‑04‑17‑k
+#  • Adopt 7‑phase lifecycle rubric (Spark → Maintenance/LTS).
+#  • New metrics: commits last 90 days, repo age, last release date.
+#  • Refined classification thresholds (per TAC discussion 2025‑04‑17).
+#  • Summary table already uses clean repo names (no “.json”).
 #  =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -87,39 +87,74 @@ jobs:
           REPO: ${{ matrix.repo_slug }}
         run: |
           set -euo pipefail
-          fields="nameWithOwner,isArchived,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,latestRelease,pushedAt"
+          fields="nameWithOwner,isArchived,defaultBranchRef,createdAt,updatedAt,pushedAt,assignableUsers{totalCount},latestRelease{createdAt}"
           if ! gh repo view "$REPO" --json "$fields" > repo.json 2>err.log; then
             echo "⚠️  $REPO – $(cat err.log)" >&2
             echo '{}' > repo.json
           fi
           echo "json=$(cat repo.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Determine lifecycle phase (inline)
+      - name: Determine lifecycle phase (7‑phase rubric)
         id: phase
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
             const repo = JSON.parse(process.env.REPO_JSON || '{}');
-            function daysAgo(dt){return (Date.now()-new Date(dt))/(864e5);}  
-            let phase='Unknown';
-            if(Object.keys(repo).length===0){phase='Inaccessible';}
-            else if(repo.isArchived){phase='Archive';}
-            else{
-              const contributors=repo.assignableUsers?.totalCount||0;
-              const releases=repo.releases?.totalCount||0;
-              const silent=daysAgo(repo.updatedAt);
-              if(contributors<3){phase='Spark';}
-              else if(contributors<5||releases===0){phase='Incubation';}
-              else if(silent<180){phase='Active Development';}
-              else if(silent<365){phase='Stable';}
-              else{phase='Maintenance';}
+            const slug = process.env.REPO_SLUG || '';
+            const [owner, repoName] = slug.split('/');
+
+            // helper to get days‑ago numbers
+            const daysAgo = iso => (Date.now() - new Date(iso)) / 864e5;
+
+            // early exits ---------------------------------------------------
+            let phase = 'Unknown';
+            if (!Object.keys(repo).length) {
+              phase = 'Inaccessible';
+            } else if (repo.isArchived) {
+              phase = 'Archive';
+            } else {
+              // gather metrics ---------------------------------------------
+              const contributors = repo.assignableUsers?.totalCount ?? 0;
+              const silent       = daysAgo(repo.pushedAt || repo.updatedAt);
+              const ageYrs       = (Date.now() - new Date(repo.createdAt)) / (365 * 864e5);
+              const hasRelease   = !!repo.latestRelease;
+              const lastRelDays  = hasRelease ? daysAgo(repo.latestRelease.createdAt) : Infinity;
+
+              // commits in last 90 days (may be heavy – single, paginated call)
+              let commits90d = 0;
+              try {
+                const since = new Date(Date.now() - 90 * 864e5).toISOString();
+                const commits = await github.paginate(github.rest.repos.listCommits, {
+                  owner,
+                  repo: repoName,
+                  since,
+                  per_page: 100,
+                });
+                commits90d = commits.length;
+              } catch (_) { /* ignore rate‑limit or permission issues */ }
+
+              // boolean tests ----------------------------------------------
+              const isSpark   = contributors < 3 || !hasRelease;
+              const isIncub   = contributors >= 3 && hasRelease;
+              const isActive  = silent <= 30 && commits90d >= 20;
+              const isStable  = silent > 30 && silent <= 180;
+              const isLTS     = ageYrs >= 5 && silent > 180 && silent <= 540 && lastRelDays <= 730;
+
+              if      (isSpark)  phase = 'Spark';
+              else if (isIncub)  phase = 'Incubation';
+              else if (isActive) phase = 'Active Development';
+              else if (isStable) phase = 'Stable';
+              else if (isLTS)    phase = 'Maintenance / LTS';
+              else               phase = 'Unknown';
             }
-            core.setOutput('phase',phase);
-            const fs=require('fs');
-            try{fs.writeFileSync('repo.json',JSON.stringify({phase},null,2));}catch{ }
+
+            core.setOutput('phase', phase);
+            const fs = require('fs');
+            try { fs.writeFileSync('repo.json', JSON.stringify({ phase }, null, 2)); } catch {}
         env:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
+          REPO_SLUG: ${{ matrix.repo_slug }}
 
       - name: Sanitize artifact name
         shell: bash
@@ -151,21 +186,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          declare -A rows  # associative array keyed by project → accumulated rows
-
+          declare -A rows
           for dir in artifacts/*; do
             [[ -d "$dir" ]] || continue
-            slug=$(basename "$dir")            # org--repo.json
-            slug=${slug%.json}                  # drop .json suffix
-            full=${slug//--/\/}               # → org/repo
-            project=${full%%/*}                 # org
-            repo=${full#*/}                     # repository name
+            slug=$(basename "$dir")      # org--repo.json
+            slug=${slug%.json}
+            full=${slug//--/\/}
+            project=${full%%/*}
+            repo=${full#*/}
             phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
             if [[ -n "${rows[$project]:-}" ]]; then rows[$project]+=$'\n'; fi
             rows[$project]+="| $repo | $phase |"
           done
-
           {
             echo "# LFN Project Lifecycle Summary"
             for project in "${!rows[@]}"; do
@@ -173,18 +205,14 @@ jobs:
               echo "## $project"
               echo "| Repository | Phase |"
               echo "|------------|-------|"
-              # print rows for this project, sorted alphabetically by repository
               printf '%s\n' "${rows[$project]}" | sort
             done
           } > summary.md
-
-          # Expose as step output and to run summary
           {
             echo 'summary<<EOF'
             cat summary.md
             echo EOF
           } >> "$GITHUB_OUTPUT"
-
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/github-script@v7
@@ -194,13 +222,16 @@ jobs:
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
-            const mode=process.env.MODE;
-            const body=process.env.SUMMARY;
-            const title=mode==='induction' ? `🆕 LFN Project Induction` : '🔄 Weekly Lifecycle Review – LFN Projects';
-            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,labels:'lfn-governance',state:'open',per_page:100});
-            const existing=issues.find(i=>i.title.startsWith(title));
-            if(existing){await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,body});}
-            else{await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,labels:['lfn-governance'],body});}
+            const mode = process.env.MODE;
+            const body = process.env.SUMMARY;
+            const title = mode === 'induction' ? `🆕 LFN Project Induction` : '🔄 Weekly Lifecycle Review – LFN Projects';
+            const { data: issues } = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, labels: 'lfn-governance', state: 'open', per_page: 100 });
+            const existing = issues.find(i => i.title.startsWith(title));
+            if (existing) {
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, labels: ['lfn-governance'], body });
+            }
 
       - name: Notify Slack
         if: env.SLACK_WEBHOOK
