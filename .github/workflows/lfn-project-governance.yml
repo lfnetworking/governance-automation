@@ -160,10 +160,6 @@ jobs:
             cat summary.md
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          cat summary.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT" >> $GITHUB_OUTPUT
-          cat summary.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
       - uses: actions/github-script@v7
         env:
@@ -181,6 +177,12 @@ jobs:
             else{await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,labels:['lfn-governance'],body});}
 
       - name: Notify Slack
+        if: env.SLACK_WEBHOOK
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: '{"text":"LFN governance run finished – see issue for details"}'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         if: env.SLACK_WEBHOOK
         uses: slackapi/slack-github-action@v1.25.0
         with:
