@@ -62,7 +62,7 @@ jobs:
             declare -a matrix
             for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
               echo "📦 $org" >&2
-              gh repo list "$org" --json name -q '.[].name' | while read -r repo; do
+              for repo in $(gh repo list "$org" --json name -q '.[].name'); do
                 matrix+=("$org/$repo")
               done
             done
