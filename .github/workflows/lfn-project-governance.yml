@@ -1,10 +1,11 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑e
-#  • Added fault‑tolerant wrapper around `gh repo view` in the *classify* job.
-#    When a repo is private/archived/missing, we log a warning, drop an empty
-#    `{}` placeholder, and continue—so one bad repo no longer fails the matrix.
+#  CHANGELOG 2025‑04‑17‑f
+#  • Removed external dependency `.github/scripts/lifecycle`.  Lifecycle phase
+#    calculation is now **embedded inline** in the github‑script block, so you
+#    don’t need to create extra files.
+#  • Added `isArchived` to `gh repo view` field list for accurate phase logic.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -33,7 +34,7 @@ permissions:
   id-token: write
 
 env:
-  GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}   # Auth for all gh CLI calls
+  GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
 
 jobs:
   enumerate-projects:
@@ -45,12 +46,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install yq (YAML processor)
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y yq
+      - name: Install yq
+        run: sudo apt-get update -y && sudo apt-get install -y yq
 
-      - name: Read org inventory & expand to repo list
+      - name: Build repo matrix
         id: set-matrix
         shell: bash
         env:
@@ -60,19 +59,18 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$MODE" == "induction" ]]; then
-            matrix_json="[\"${PROJECT_ORG}/${PROJECT_REPO}\"]"
+            echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
           else
             declare -a matrix
             for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
-              echo "📦 Enumerating repos in $org" >&2
-              while read -r repo; do
+              echo "📦 $org" >&2
+              gh repo list "$org" --json name -q '.[].name' | while read -r repo; do
                 matrix+=("$org/$repo")
-              done < <(gh repo list "$org" --json name -q '.[].name')
+              done
             done
-            matrix_json=$(printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs .)
+            printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
+              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix: $json" >&2; }
           fi
-          echo "Matrix JSON: $matrix_json" >&2
-          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
 
   classify:
     needs: enumerate-projects
@@ -82,33 +80,47 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      - name: 🔍  Collect repository metrics (tolerant)
+      - name: Collect repository metrics (tolerant)
         id: metrics
         shell: bash
         env:
           REPO: ${{ matrix.repo_slug }}
         run: |
           set -euo pipefail
-          fields="nameWithOwner,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,releases,pushedAt"
+          fields="nameWithOwner,isArchived,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,releases,pushedAt"
           if ! gh repo view "$REPO" --json "$fields" > repo.json 2>err.log; then
-            echo "⚠️  Skipping $REPO – $(cat err.log)" >&2
+            echo "⚠️  $REPO – $(cat err.log)" >&2
             echo '{}' > repo.json
           fi
           echo "json=$(cat repo.json)" >> "$GITHUB_OUTPUT"
 
-      - name: 🧮  Classify lifecycle phase
+      - name: Determine lifecycle phase (inline)
         id: phase
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
-            const data = JSON.parse(process.env.REPO_JSON || '{}');
-            const classify = require('./.github/scripts/lifecycle');
-            core.setOutput('phase', classify(data));
+            const repo = JSON.parse(process.env.REPO_JSON || '{}');
+            const core = require('@actions/core');
+            function daysAgo(dt){return (Date.now()-new Date(dt))/(864e5);}  
+            let phase='Unknown';
+            if(Object.keys(repo).length===0){phase='Inaccessible';}
+            else if(repo.isArchived){phase='Archive';}
+            else{
+              const contributors=repo.assignableUsers?.totalCount||0;
+              const releases=repo.releases?.totalCount||0;
+              const silent=daysAgo(repo.updatedAt);
+              if(contributors<3){phase='Spark';}
+              else if(contributors<5||releases===0){phase='Incubation';}
+              else if(silent<180){phase='Active Development';}
+              else if(silent<365){phase='Stable';}
+              else{phase='Maintenance';}
+            }
+            core.setOutput('phase',phase);
         env:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
 
-      - name: ⬆️  Upload per‑project result
+      - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: "${{ matrix.repo_slug }}.json"
@@ -126,9 +138,9 @@ jobs:
       - id: build-md
         run: |
           node .github/scripts/build-summary.js artifacts > summary.md
-          echo "summary<<EOF" >> "$GITHUB_OUTPUT"
-          cat summary.md >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          cat summary.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - uses: actions/github-script@v7
         env:
@@ -137,45 +149,22 @@ jobs:
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
-            const mode = process.env.MODE;
-            const body = process.env.SUMMARY;
-            const title = mode === 'induction'
-              ? `🆕 LFN Project Induction – ${process.env.PROJECT_REPO}`
-              : '🔄 Weekly Lifecycle Review – LFN Projects';
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: 'lfn-governance',
-              state: 'open',
-              per_page: 100,
-            });
-            const existing = issues.find(i => i.title.startsWith(title));
-            if (existing) {
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: existing.number,
-                body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                labels: ['lfn-governance'],
-                body,
-              });
-            }
+            const mode=process.env.MODE;
+            const body=process.env.SUMMARY;
+            const title=mode==='induction' ? `🆕 LFN Project Induction` : '🔄 Weekly Lifecycle Review – LFN Projects';
+            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,labels:'lfn-governance',state:'open',per_page:100});
+            const existing=issues.find(i=>i.title.startsWith(title));
+            if(existing){await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,body});}
+            else{await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,labels:['lfn-governance'],body});}
 
-      - name: 💬  (Optional) Notify Slack
-        if: env.SLACK_WEBHOOK != ''
+      - name: Notify Slack
+        if: env.SLACK_WEBHOOK
         uses: slackapi/slack-github-action@v1.25.0
         with:
-          payload: |
-            { "text": "LFN governance run finished – see issue for details" }
+          payload: '{"text":"LFN governance run finished – see issue for details"}'
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
 # ----------------------------------------------------------------------------
-#  Helper script stubs remain unchanged
+#  No external helper scripts required anymore.
 # ----------------------------------------------------------------------------
