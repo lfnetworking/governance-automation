@@ -1,11 +1,13 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑k
-#  • Adopt 7‑phase lifecycle rubric (Spark → Maintenance/LTS).
-#  • New metrics: commits last 90 days, repo age, last release date.
-#  • Refined classification thresholds (per TAC discussion 2025‑04‑17).
-#  • Summary table already uses clean repo names (no “.json”).
+#  CHANGELOG 2025‑04‑17‑m
+#  • Fix: all repos were classified as **Inaccessible** – GraphQL field requiring
+#    extra scopes caused gh cli to error. Re‑implemented metrics collection using
+#    REST API only and trimmed the GraphQL query.
+#  • Removed `assignableUsers` from query; contributor count is now gathered via
+#    REST (`listContributors`, first 100).
+#  • Added explicit GH_TOKEN export & auth status check to aid debugging.
 #  =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -80,15 +82,23 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      - name: Collect repository metrics (tolerant)
+      - name: GitHub CLI auth debug
+        run: |
+          echo "== gh auth status ==" && gh auth status || true
+        env:
+          GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
+
+      - name: Collect repository metrics (REST‑only)
         id: metrics
         shell: bash
         env:
           REPO: ${{ matrix.repo_slug }}
         run: |
           set -euo pipefail
-          fields="nameWithOwner,isArchived,defaultBranchRef,createdAt,updatedAt,pushedAt,assignableUsers{totalCount},latestRelease{createdAt}"
-          if ! gh repo view "$REPO" --json "$fields" > repo.json 2>err.log; then
+          owner="${REPO%%/*}"
+          repo="${REPO#*/}"
+          # basic repo data
+          if ! gh api "/repos/$owner/$repo" > repo.json 2>err.log; then
             echo "⚠️  $REPO – $(cat err.log)" >&2
             echo '{}' > repo.json
           fi
@@ -100,46 +110,51 @@ jobs:
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
-            const repo = JSON.parse(process.env.REPO_JSON || '{}');
-            const slug = process.env.REPO_SLUG || '';
+            const repo   = JSON.parse(process.env.REPO_JSON || '{}');
+            const slug   = process.env.REPO_SLUG || '';
             const [owner, repoName] = slug.split('/');
 
-            // helper to get days‑ago numbers
+            // helper -------------------------------------------------------
             const daysAgo = iso => (Date.now() - new Date(iso)) / 864e5;
 
-            // early exits ---------------------------------------------------
             let phase = 'Unknown';
             if (!Object.keys(repo).length) {
               phase = 'Inaccessible';
-            } else if (repo.isArchived) {
+            } else if (repo.archived) {
               phase = 'Archive';
             } else {
-              // gather metrics ---------------------------------------------
-              const contributors = repo.assignableUsers?.totalCount ?? 0;
-              const silent       = daysAgo(repo.pushedAt || repo.updatedAt);
-              const ageYrs       = (Date.now() - new Date(repo.createdAt)) / (365 * 864e5);
-              const hasRelease   = !!repo.latestRelease;
-              const lastRelDays  = hasRelease ? daysAgo(repo.latestRelease.createdAt) : Infinity;
+              // collect additional metrics via REST -----------------------
+              let contributors = 0;
+              try {
+                const { data: contrib } = await github.rest.repos.listContributors({ owner, repo: repoName, per_page: 100, anon: true });
+                contributors = contrib.length;
+              } catch (_) {}
 
-              // commits in last 90 days (may be heavy – single, paginated call)
+              const silent       = daysAgo(repo.pushed_at || repo.updated_at);
+              const ageYrs       = (Date.now() - new Date(repo.created_at)) / (365 * 864e5);
+
+              // latest release --------------------------------------------
+              let lastRelDays = Infinity;
+              try {
+                const { data: rel } = await github.rest.repos.getLatestRelease({ owner, repo: repoName });
+                lastRelDays = daysAgo(rel.published_at);
+              } catch (_) {}
+              const hasRelease = Number.isFinite(lastRelDays);
+
+              // commits 90d ----------------------------------------------
               let commits90d = 0;
               try {
                 const since = new Date(Date.now() - 90 * 864e5).toISOString();
-                const commits = await github.paginate(github.rest.repos.listCommits, {
-                  owner,
-                  repo: repoName,
-                  since,
-                  per_page: 100,
-                });
+                const commits = await github.paginate(github.rest.repos.listCommits, { owner, repo: repoName, since, per_page: 100 });
                 commits90d = commits.length;
-              } catch (_) { /* ignore rate‑limit or permission issues */ }
+              } catch (_) {}
 
-              // boolean tests ----------------------------------------------
-              const isSpark   = contributors < 3 || !hasRelease;
-              const isIncub   = contributors >= 3 && hasRelease;
-              const isActive  = silent <= 30 && commits90d >= 20;
-              const isStable  = silent > 30 && silent <= 180;
-              const isLTS     = ageYrs >= 5 && silent > 180 && silent <= 540 && lastRelDays <= 730;
+              // rules -----------------------------------------------------
+              const isSpark = contributors < 3 || !hasRelease;
+              const isIncub = contributors >= 3 && hasRelease;
+              const isActive = silent <= 30 && commits90d >= 20;
+              const isStable = silent > 30 && silent <= 180;
+              const isLTS = ageYrs >= 5 && silent > 180 && silent <= 540 && lastRelDays <= 730;
 
               if      (isSpark)  phase = 'Spark';
               else if (isIncub)  phase = 'Incubation';
@@ -151,7 +166,7 @@ jobs:
 
             core.setOutput('phase', phase);
             const fs = require('fs');
-            try { fs.writeFileSync('repo.json', JSON.stringify({ phase }, null, 2)); } catch {}
+            fs.writeFileSync('repo.json', JSON.stringify({ phase }, null, 2));
         env:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
           REPO_SLUG: ${{ matrix.repo_slug }}
@@ -179,9 +194,6 @@ jobs:
         with:
           path: artifacts
 
-      # ----------------------------------------------------------------------
-      # Build Markdown summary grouped by *Project Org* ----------------------
-      # ----------------------------------------------------------------------
       - id: build-md
         shell: bash
         run: |
@@ -189,7 +201,261 @@ jobs:
           declare -A rows
           for dir in artifacts/*; do
             [[ -d "$dir" ]] || continue
-            slug=$(basename "$dir")      # org--repo.json
+            slug=$(basename "$dir")
+            slug=${slug%.json}
+            full=${slug//--/\/}
+            project=${full%%/*}
+            repo=${full#*/}
+            phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
+            if [[ -n "${rows[$project]:-}" ]]; then rows[$project]+=$'\n'; fi
+            rows[$project]+="| $repo | $phase |"
+          done
+          {
+            echo "# LFN Project Lifecycle Summary"
+            for project in "${!rows[@]}"; do
+              echo
+              echo "## $project"
+              echo "| Repository | Phase |"
+              echo "|------------|-------|"
+              printf '%s\n' "${rows[$project]}" | sort
+            done
+          } > summary.md
+          {
+            echo 'summary<<EOF'
+            cat summary.md
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/github-script@v7
+        env:
+          SUMMARY: ${{ steps.build-md.outputs.summary }}
+          MODE: ${{ github.event.inputs.mode || 'review' }}
+        with:
+          github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
+          script: |
+            const mode = process.env.MODE;
+            const body = process.env.SUMMARY;
+            const title = mode === 'induction' ? `🆕 LFN Project Induction` : '🔄 Weekly Lifecycle Review – LFN Projects';
+            const { data: issues } = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, labels: 'lfn-governance', state: 'open', per_page: 100 });
+            const existing = issues.find(i => i.title.startsWith(title));
+            if (existing) {
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, labels: ['lfn-governance'], body });
+            }
+
+      - name: Notify Slack
+        if: env.SLACK_WEBHOOK
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: '{"text":"LFN governance run finished – see issue for details"}'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+# =============================================================================
+#  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
+#  ---------------------------------------------------------------------------
+#  CHANGELOG 2025‑04‑17‑m
+#  • Fix: all repos were classified as **Inaccessible** – GraphQL field requiring
+#    extra scopes caused gh cli to error. Re‑implemented metrics collection using
+#    REST API only and trimmed the GraphQL query.
+#  • Removed `assignableUsers` from query; contributor count is now gathered via
+#    REST (`listContributors`, first 100).
+#  • Added explicit GH_TOKEN export & auth status check to aid debugging.
+#  =============================================================================
+name: "LFN Project Governance Automation"
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose the run mode"
+        required: true
+        default: "review"
+        type: choice
+        options: [review, induction]
+      project_org:
+        description: "(induction) GitHub org where the new project lives"
+        required: false
+      project_repo:
+        description: "(induction) Repository slug <org>/<repo>"
+        required: false
+  schedule:
+    - cron: "0 9 * * 1"   # 09:00 UTC Monday → 02:00 PT
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  id-token: write
+
+env:
+  GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
+
+jobs:
+  enumerate-projects:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install yq
+        run: sudo apt-get update -y && sudo apt-get install -y yq
+
+      - name: Build repo matrix
+        id: set-matrix
+        shell: bash
+        env:
+          MODE: ${{ github.event.inputs.mode || 'review' }}
+          PROJECT_ORG: ${{ github.event.inputs.project_org }}
+          PROJECT_REPO: ${{ github.event.inputs.project_repo }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" == "induction" ]]; then
+            echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
+          else
+            declare -a matrix
+            for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
+              echo "📦 $org" >&2
+              for repo in $(gh repo list "$org" --json name -q '.[].name'); do
+                matrix+=("$org/$repo")
+              done
+            done
+            printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
+              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix: $json" >&2; }
+          fi
+
+  classify:
+    needs: enumerate-projects
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
+    steps:
+      - name: GitHub CLI auth debug
+        run: |
+          echo "== gh auth status ==" && gh auth status || true
+        env:
+          GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
+
+      - name: Collect repository metrics (REST‑only)
+        id: metrics
+        shell: bash
+        env:
+          REPO: ${{ matrix.repo_slug }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%%/*}"
+          repo="${REPO#*/}"
+          # basic repo data
+          if ! gh api "/repos/$owner/$repo" > repo.json 2>err.log; then
+            echo "⚠️  $REPO – $(cat err.log)" >&2
+            echo '{}' > repo.json
+          fi
+          echo "json=$(cat repo.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Determine lifecycle phase (7‑phase rubric)
+        id: phase
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
+          script: |
+            const repo   = JSON.parse(process.env.REPO_JSON || '{}');
+            const slug   = process.env.REPO_SLUG || '';
+            const [owner, repoName] = slug.split('/');
+
+            // helper -------------------------------------------------------
+            const daysAgo = iso => (Date.now() - new Date(iso)) / 864e5;
+
+            let phase = 'Unknown';
+            if (!Object.keys(repo).length) {
+              phase = 'Inaccessible';
+            } else if (repo.archived) {
+              phase = 'Archive';
+            } else {
+              // collect additional metrics via REST -----------------------
+              let contributors = 0;
+              try {
+                const { data: contrib } = await github.rest.repos.listContributors({ owner, repo: repoName, per_page: 100, anon: true });
+                contributors = contrib.length;
+              } catch (_) {}
+
+              const silent       = daysAgo(repo.pushed_at || repo.updated_at);
+              const ageYrs       = (Date.now() - new Date(repo.created_at)) / (365 * 864e5);
+
+              // latest release --------------------------------------------
+              let lastRelDays = Infinity;
+              try {
+                const { data: rel } = await github.rest.repos.getLatestRelease({ owner, repo: repoName });
+                lastRelDays = daysAgo(rel.published_at);
+              } catch (_) {}
+              const hasRelease = Number.isFinite(lastRelDays);
+
+              // commits 90d ----------------------------------------------
+              let commits90d = 0;
+              try {
+                const since = new Date(Date.now() - 90 * 864e5).toISOString();
+                const commits = await github.paginate(github.rest.repos.listCommits, { owner, repo: repoName, since, per_page: 100 });
+                commits90d = commits.length;
+              } catch (_) {}
+
+              // rules -----------------------------------------------------
+              const isSpark = contributors < 3 || !hasRelease;
+              const isIncub = contributors >= 3 && hasRelease;
+              const isActive = silent <= 30 && commits90d >= 20;
+              const isStable = silent > 30 && silent <= 180;
+              const isLTS = ageYrs >= 5 && silent > 180 && silent <= 540 && lastRelDays <= 730;
+
+              if      (isSpark)  phase = 'Spark';
+              else if (isIncub)  phase = 'Incubation';
+              else if (isActive) phase = 'Active Development';
+              else if (isStable) phase = 'Stable';
+              else if (isLTS)    phase = 'Maintenance / LTS';
+              else               phase = 'Unknown';
+            }
+
+            core.setOutput('phase', phase);
+            const fs = require('fs');
+            fs.writeFileSync('repo.json', JSON.stringify({ phase }, null, 2));
+        env:
+          REPO_JSON: ${{ steps.metrics.outputs.json }}
+          REPO_SLUG: ${{ matrix.repo_slug }}
+
+      - name: Sanitize artifact name
+        shell: bash
+        env:
+          REPO: ${{ matrix.repo_slug }}
+        run: |
+          safe="${REPO//\//--}"
+          echo "ART_NAME=$safe" >> $GITHUB_ENV
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ env.ART_NAME }}.json"
+          path: repo.json
+
+  publish-report:
+    needs: classify
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - id: build-md
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A rows
+          for dir in artifacts/*; do
+            [[ -d "$dir" ]] || continue
+            slug=$(basename "$dir")
             slug=${slug%.json}
             full=${slug//--/\/}
             project=${full%%/*}
