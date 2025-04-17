@@ -85,7 +85,7 @@ jobs:
           REPO: ${{ matrix.repo_slug }}
         run: |
           set -euo pipefail
-          fields="nameWithOwner,isArchived,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,releases,pushedAt"
+          fields="nameWithOwner,isArchived,defaultBranchRef,createdAt,updatedAt,assignableUsers,issues,latestRelease,pushedAt"
           if ! gh repo view "$REPO" --json "$fields" > repo.json 2>err.log; then
             echo "⚠️  $REPO – $(cat err.log)" >&2
             echo '{}' > repo.json
@@ -114,6 +114,8 @@ jobs:
               else{phase='Maintenance';}
             }
             core.setOutput('phase',phase);
+            const fs=require('fs');
+            try{fs.writeFileSync('repo.json',JSON.stringify({phase},null,2));}catch{ }
         env:
           REPO_JSON: ${{ steps.metrics.outputs.json }}
 
