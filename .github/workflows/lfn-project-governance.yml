@@ -1,9 +1,11 @@
 # =============================================================================
 #  LFN Project Governance Automation Workflow – *Option C* (auto‑discover repos)
 #  ---------------------------------------------------------------------------
-#  CHANGELOG 2025‑04‑17‑g
-#  • Fixed "Identifier 'core' has already been declared" by removing the extra
-#    `const core = require('@actions/core');` inside the github‑script block.
+#  CHANGELOG 2025‑04‑17‑h
+#  • Fix summary output quoting so the full Markdown table reaches the Issue body
+#    (EOFM delimiter must be un‑quoted).
+#  • Pipe summary into $GITHUB_STEP_SUMMARY so the roll‑up is visible right in
+#    the run’s “Summary” tab as well.
 # =============================================================================
 name: "LFN Project Governance Automation"
 
@@ -155,11 +157,14 @@ jobs:
             phase=$(jq -r '.phase // "Unknown"' "$f" 2>/dev/null || echo "Unknown")
             echo "| $orig | $phase |" >> summary.md
           done
+          # export as step output (multi‑line) – *EOF delimiter must be UN‑quoted*
           {
-            echo "summary<<EOF"
+            echo 'summary<<EOF'
             cat summary.md
-            echo "EOF"
+            echo EOF
           } >> "$GITHUB_OUTPUT"
+          # and surface directly in the run summary UI
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/github-script@v7
         env:
