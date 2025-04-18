@@ -129,30 +129,38 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checks out the main governance-automation repo so classify-config is available
-      - name: Checkout automation repo
+      # Checks out each individual repo so its metadata can be read by the classify action
+      - name: Checkout target repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          repository: ${{ matrix.repo_slug }}
+          path: target-repo
+
+      # Checks out the automation repo so classify-config is available
+      - name: Checkout governance-automation repo
+        uses: actions/checkout@v4
+        with:
+          path: automation
 
       # Calls the local action in classify-config/ with inputs repo + config
       - name: Run classification action
-        uses: ./.github/classify-config
+        uses: ./automation/.github/classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config_path: .github/workflows/classify-config.yml
+          config_path: automation/.github/workflows/classify-config.yml
 
       # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
       - name: Sanitize artifact name
         id: sanitize
         run: echo "safe_name=${{ matrix.repo_slug }}" | sed 's|/|--|g' >> $GITHUB_OUTPUT
-      
+
       # Upload the classification output (repo.json) for aggregation in report
       - name: Upload classification result
         uses: actions/upload-artifact@v4
         with:
           name: "${{ steps.sanitize.outputs.safe_name }}.json"
           path: repo.json
+
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 📋 Publish Report: Aggregates results and posts Markdown summary to GitHub Issue
