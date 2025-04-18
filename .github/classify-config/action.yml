@@ -2,10 +2,10 @@ name: "Classify Lifecycle Phase"
 description: "Evaluate repo metrics and assign LFN lifecycle phase"
 inputs:
   repo:
-    description: "Full repo slug (e.g. org/repo)"
+    description: 'GitHub repo in <org>/<name> format'
     required: true
-  config:
-    description: "JSON string of lifecycle classification config"
+  config_path:
+    description: 'Path to classify-config.yml'
     required: true
 outputs:
   phase:
