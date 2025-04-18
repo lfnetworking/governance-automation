@@ -187,7 +187,7 @@ jobs:
         uses: ./.github/classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config: ${{ steps.load-config.outputs.json }}
+          config_path: .lfn/classify-config.yml
 
       - name: Sanitize artifact name
         id: sanitize
