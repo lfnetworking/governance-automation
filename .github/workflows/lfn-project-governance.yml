@@ -189,11 +189,16 @@ jobs:
           repo: ${{ matrix.repo_slug }}
           config: ${{ steps.load-config.outputs.json }}
 
+      - name: Sanitize artifact name
+        id: sanitize
+        run: echo "safe_name=${{ matrix.repo_slug }}" | sed 's|/|--|g' >> $GITHUB_OUTPUT
+      
       - name: Upload classification result
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ matrix.repo_slug//\//-- }}.json"
+          name: "${{ steps.sanitize.outputs.safe_name }}.json"
           path: repo.json
+
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 📝 Publish Report: Builds markdown summary of repo statuses across orgs and
