@@ -46,55 +46,6 @@
 #  -----------------------------
 #  This workflow is intentionally designed to be both verbose and structured for readability and ease of community collaboration. Community members are encouraged to contribute suggestions, enhancements, or adjustments to the logic to ensure continuous improvement and alignment with community goals.
 
-# =============================================================================
-#  LFN Project Governance Automation Workflow
-#  --------------------------------------------------------------------------------
-#  PURPOSE
-#  -------
-#  This workflow aims to provide consistency and engagement to the governance and health-check processes for Projects across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC). This information will be helpful to the Members of the Board when making strategic decisions. 
-#  The timing of the assessment would depend on their lifecycle phase and the metrics being checked. The timing will need to be customizable by the TAC.
-
-#  CORE OBJECTIVES
-#  ---------------
-#  • **Automated Repository Assessment:**
-#    - Periodically scan every repository within the LFN umbrella projects (and induction-candidate repositories).
-#    - Read existing health metrics, including commit activity, contributor engagement, release history, and lifecycle status.
-#    - Initially designed to operate without requiring elevated permissions or special GitHub GraphQL scopes, ensuring secure, transparent, and community-friendly operation.
-
-#  • **Lifecycle Classification:**
-#    - Clearly categorize repositories into one of seven TAC-defined lifecycle phases:
-#      1. Spark (Candidate/New)
-#      2. Incubation
-#      3. Active Development
-#      4. Stable
-#      5. Maintenance/Long-Term Support (LTS)
-#      6. Archive
-#      7. Inaccessible (permissions issue or repository not found)
-#    - Provide a simple, community-readable summary for easy tracking and oversight by project maintainers, Program Managers (PMs), and the TAC.
-
-#  • **Friendly and Encouraging Community Engagement:**
-#    - Automatically create/update one GitHub issue per organization (project-level) with clear, friendly, and actionable next-step suggestions to improve their project's lifecycle status.
-#    - Issues will not impose strict deadlines, emphasizing encouragement and constructive guidance, with recommended adjustable check-ins for progress updates.
-#    - Repositories classified as "Archive" or "Inaccessible" are intentionally excluded from next-step issues as they have reached terminal phases.
-
-#  FUTURE ENHANCEMENTS
-#  -------------------
-#  • **Security and Health:**
-#    - Incorporate OSSF Scorecard checks
-#    - Open tickets to the orgs (project-level) with helpful steps they can take to improve their current OSSF scorecard
-#    
-#  • **Governance and Leadership:**
-#    - Technical Steering Committee (TSC) membership is often submitted as part of Induction levels beyond Spark (and possibly even at Spark), but it is not always maintained in GitHub.  With community 
-#      agreement, it may be easier to maintain in GitHub for automation, if we can agree on a standard
-#
-#  • **Flexible TAC Lifecycle Adjustment:**
-#    - Provide a clear, documented mechanism to modify lifecycle phase datapoints based on official TAC approvals (authentication of approvals currently outside workflow scope, maintained by LF staff or authorized community maintainers for now discuss with community).
-
-#  READABILITY & MAINTAINABILITY
-#  -----------------------------
-#  This workflow is intentionally designed to be both verbose and structured for readability and ease of community collaboration. Community members are encouraged to contribute suggestions, enhancements, or adjustments to the logic to ensure continuous improvement and alignment with community goals.
-
-
 name: "LFN Project Governance Automation"
 
 on:
@@ -134,13 +85,16 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
+      # Checkout this repository so that .lfn/projects.yaml can be read
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # Installs yq so YAML can be parsed in shell script below
       - name: Install yq
         run: sudo apt-get update -y && sudo apt-get install -y yq
 
+      # Create the matrix of repos to scan. If mode is 'induction' use input slug, else scan .lfn config
       - name: Build repo matrix
         id: set-matrix
         shell: bash
@@ -165,8 +119,7 @@ jobs:
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 🧪 Classify: Uses lifecycle thresholds from classify-config.yml and applies
-  #     them dynamically to each repository in the matrix
+  # 🧪 Classify: Classifies each repo based on metrics and classify-config.yml
   # ─────────────────────────────────────────────────────────────────────────────
   classify:
     needs: enumerate-projects
@@ -176,39 +129,43 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
+      # Checks out each individual repo so its metadata can be read by the classify action
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # Calls the local action in classify-config/ with inputs repo + config
       - name: Run classification action
-        uses: ./.github/classify-config
+        uses: ./classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config_path: .lfn/classify-config.yml
+          config_path: .github/workflows/classify-config.yml
 
+      # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
       - name: Sanitize artifact name
         id: sanitize
         run: echo "safe_name=${{ matrix.repo_slug }}" | sed 's|/|--|g' >> $GITHUB_OUTPUT
       
+      # Upload the classification output (repo.json) for aggregation in report
       - name: Upload classification result
         uses: actions/upload-artifact@v4
         with:
           name: "${{ steps.sanitize.outputs.safe_name }}.json"
           path: repo.json
 
-
   # ─────────────────────────────────────────────────────────────────────────────
-  # 📝 Publish Report: Builds markdown summary of repo statuses across orgs and
-  #     posts to governance issue
+  # 📋 Publish Report: Aggregates results and posts Markdown summary to GitHub Issue
   # ─────────────────────────────────────────────────────────────────────────────
   publish-report:
     needs: classify
     runs-on: ubuntu-latest
     if: always()
     steps:
+      # Downloads all previously uploaded repo.json files for processing
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      # Parses all JSON files into Markdown summary grouped by project
       - id: build-md
         shell: bash
         run: |
@@ -244,6 +201,7 @@ jobs:
           echo EOF >> "$GITHUB_OUTPUT"
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
+      # Updates or creates a governance issue on the repo with the report content
       - name: Create or update governance issue
         uses: actions/github-script@v7
         with:
@@ -266,6 +224,7 @@ jobs:
               core.info('Created new governance issue');
             }
 
+      # Optional notification to Slack channel (if webhook is configured)
       - name: Notify Slack (optional)
         if: ${{ env.SLACK_WEBHOOK_URL != '' }}
         uses: slackapi/slack-github-action@v1.24.0
