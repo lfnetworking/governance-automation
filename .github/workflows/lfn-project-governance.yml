@@ -129,18 +129,18 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checkout this repo so the local action is available relative to root
+      # Checkout root repo to access local actions
       - name: Checkout root repo (governance-automation)
         uses: actions/checkout@v4
 
-      # Checkout the target project repo for classification
+      # Checkout target repo to subdir (optional if data needed)
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: repo
 
-      # Run the classify-config local action explicitly from known path
+      # Run the classify-config local action relative to checked-out root
       - name: Run classification action
         uses: ./.github/classify-config
         with:
@@ -158,7 +158,6 @@ jobs:
         with:
           name: "${{ steps.sanitize.outputs.safe_name }}.json"
           path: repo.json
-
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 📋 Publish Report: Aggregates results and posts Markdown summary to GitHub Issue
