@@ -3,13 +3,14 @@
 #  --------------------------------------------------------------------------------
 #  PURPOSE
 #  -------
-#  This workflow aims to automate the governance and health-check processes across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC).
+#  This workflow aims to provide consistency and engagement to the governance and health-check processes for Projects across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC). This information will be helpful to the Members of the Board when making strategic decisions. 
+#  The timing of the assessment would depend on their lifecycle phase and the metrics being checked. The timing will need to be customizable by the TAC.
 
 #  CORE OBJECTIVES
 #  ---------------
 #  • **Automated Repository Assessment:**
 #    - Periodically scan every repository within the LFN umbrella projects (and induction-candidate repositories).
-#    - Collect critical health metrics, including commit activity, contributor engagement, release history, and lifecycle status.
+#    - Read existing health metrics, including commit activity, contributor engagement, release history, and lifecycle status.
 #    - Initially designed to operate without requiring elevated permissions or special GitHub GraphQL scopes, ensuring secure, transparent, and community-friendly operation.
 
 #  • **Lifecycle Classification:**
@@ -26,7 +27,7 @@
 #  • **Friendly and Encouraging Community Engagement:**
 #    - Automatically create/update one GitHub issue per organization (project-level) with clear, friendly, and actionable next-step suggestions to improve their project's lifecycle status.
 #    - Issues will not impose strict deadlines, emphasizing encouragement and constructive guidance, with recommended quarterly check-ins for progress updates.
-#    - Repositories classified as "Archive" or "Inaccessible" are intentionally excluded from next-step issues as they have reached terminal states.
+#    - Repositories classified as "Archive" or "Inaccessible" are intentionally excluded from next-step issues as they have reached terminal phases.
 
 #  FUTURE ENHANCEMENTS
 #  -------------------
@@ -35,14 +36,15 @@
 #    - Open tickets to the orgs (project-level) with helpful steps they can take to improve their current OSSF scorecard
 #    
 #  • **Governance and Leadership:**
-#    - Technical Steering Committee (TSC) membership is often submitted as a part of an Induction levels beyond Spark (and maybe even at spark), but they are not always maintained in GitHub.  With community agreement it may be easier to maintain in GitHub for automation, if we can agree on a standard
-
+#    - Technical Steering Committee (TSC) membership is often submitted as part of Induction levels beyond Spark (and possibly even at Spark), but it is not always maintained in GitHub.  With community 
+#      agreement, it may be easier to maintain in GitHub for automation, if we can agree on a standard
+#
 #  • **Flexible TAC Lifecycle Adjustment:**
-#    - Provide a clear, documented mechanism to modify lifecycle states based on official TAC approvals (authentication of approvals currently outside workflow scope, maintained by LF staff or authorized community maintainers for now discuss with community).
+#    - Provide a clear, documented mechanism to modify lifecycle phase datapoints based on official TAC approvals (authentication of approvals currently outside workflow scope, maintained by LF staff or authorized community maintainers for now discuss with community).
 
 #  READABILITY & MAINTAINABILITY
 #  -----------------------------
-#  This workflow is intentionally verbose and structured for readability and easy community collaboration. Community members are encouraged to contribute suggestions, enhancements, or adjustments to the logic to ensure continuous improvement and alignment with community goals.
+#  This workflow is intentionally designed to be both verbose and structured for readability and ease of community collaboration. Community members are encouraged to contribute suggestions, enhancements, or adjustments to the logic to ensure continuous improvement and alignment with community goals.
 
 
 name: "LFN Project Governance Automation"
@@ -319,7 +321,7 @@ jobs:
             const repo  = context.repo.repo;
             const title = 'Automated LFN Project Lifecycle Summary';
             const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, labels: 'lfn-governance', state: 'open'
+              owner, repo, labels: 'lfn-governance', phase: 'open'
             });
             const existing = issues.find(i => i.title === title);
             if (existing) {
@@ -330,7 +332,7 @@ jobs:
               core.info('Created new governance issue');
             }
 
-      - name: Notify Slack (optional)
+      - name: Notify Slack (optional)  
         if: ${{ env.SLACK_WEBHOOK_URL != '' }}
         uses: slackapi/slack-github-action@v1.24.0
         with:
