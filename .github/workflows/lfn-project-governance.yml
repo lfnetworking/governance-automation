@@ -26,7 +26,7 @@
 
 #  • **Friendly and Encouraging Community Engagement:**
 #    - Automatically create/update one GitHub issue per organization (project-level) with clear, friendly, and actionable next-step suggestions to improve their project's lifecycle status.
-#    - Issues will not impose strict deadlines, emphasizing encouragement and constructive guidance, with recommended quarterly check-ins for progress updates.
+#    - Issues will not impose strict deadlines, emphasizing encouragement and constructive guidance, with recommended adjustable check-ins for progress updates.
 #    - Repositories classified as "Archive" or "Inaccessible" are intentionally excluded from next-step issues as they have reached terminal phases.
 
 #  FUTURE ENHANCEMENTS
