@@ -129,13 +129,15 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checks out each individual repo so its metadata can be read by the classify action
-      - name: Checkout repo
+      # Checks out the main governance-automation repo so classify-config is available
+      - name: Checkout automation repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       # Calls the local action in classify-config/ with inputs repo + config
       - name: Run classification action
-        uses: ./classify-config
+        uses: ./.github/classify-config
         with:
           repo: ${{ matrix.repo_slug }}
           config_path: .github/workflows/classify-config.yml
