@@ -179,10 +179,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Convert classify-config.yml to JSON
-        id: load-config
-        run: echo "json=$(yq -o=json .lfn/classify-config.yml)" >> "$GITHUB_OUTPUT"
-
       - name: Run classification action
         uses: ./.github/classify-config
         with:
