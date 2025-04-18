@@ -1,15 +1,16 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 const fs = require('fs');
-const config = require('js-yaml').load(fs.readFileSync(process.env.INPUT_CONFIG_PATH, 'utf8'));
+const yaml = require('js-yaml');
 
 (async () => {
   try {
     const token = process.env.GITHUB_TOKEN || core.getInput('token');
     const octokit = github.getOctokit(token);
     const repoSlug = core.getInput('repo');
-    const config = JSON.parse(core.getInput('config'));
+    const configPath = core.getInput('config_path');
 
+    const config = yaml.load(fs.readFileSync(configPath, 'utf8'));
     const [owner, repo] = repoSlug.split('/');
     const daysAgo = iso => (Date.now() - new Date(iso)) / 864e5;
 
@@ -43,12 +44,13 @@ const config = require('js-yaml').load(fs.readFileSync(process.env.INPUT_CONFIG_
 
     // Dynamic phase selection
     let selectedPhase = 'Unknown';
-    for (const [phase, rules] of Object.entries(config)) {
+    for (const [phase, rules] of Object.entries(config.phases)) {
       let isMatch = true;
       for (const [metric, constraint] of Object.entries(rules)) {
         const val = metrics[metric];
         if (constraint.min !== undefined && val < constraint.min) isMatch = false;
         if (constraint.max !== undefined && val > constraint.max) isMatch = false;
+        if (typeof constraint === 'boolean' && constraint !== !!val) isMatch = false;
       }
       if (isMatch) {
         selectedPhase = phase;
