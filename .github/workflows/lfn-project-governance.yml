@@ -142,7 +142,7 @@ jobs:
 
       # Run the classify-config local action relative to checked-out root
       - name: Run classification action
-        uses: ./.github/classify-config
+        uses: ./classify-config
         with:
           repo: ${{ matrix.repo_slug }}
           config_path: .github/workflows/classify-config.yml
