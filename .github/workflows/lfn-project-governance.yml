@@ -1,26 +1,49 @@
 # =============================================================================
-#  LFN Project Governance Automation Workflow · *Option C* (auto‑discover repos)
+#  LFN Project Governance Automation Workflow
 #  --------------------------------------------------------------------------------
 #  PURPOSE
 #  -------
-#  • Crawl every repository that belongs to an LFN umbrella project (or a single
-#    induction‑candidate repo) and collect activity, contributor and release
-#    metrics **without** requiring special GraphQL scopes.
-#  • Classify each repository into one of *seven* lifecycle phases defined by
-#    the TAC (Spark → Incubation → Active Development → Stable → Maintenance/LTS
-#    → Archive → Inaccessible).
-#  • Publish a Markdown summary (and Slack ping) so PMs & TAC can immediately
-#    see repos that may need attention.
-#  • Designed to be **readable & hackable** – heavy commentary is included below
-#    so anyone in the community can follow or tweak the logic.
-#
-#  CHANGELOG (✂ trim as needed)
-#  ---------
-#  2025‑04‑17‑p
-#    • Added *verbose, line‑by‑line comments* inside the lifecycle‑phase
-#      classifier to make the decision rubric crystal‑clear.
-#    • No runtime logic changes.
-# =============================================================================
+#  This workflow aims to automate the governance and health-check processes across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC).
+
+#  CORE OBJECTIVES
+#  ---------------
+#  • **Automated Repository Assessment:**
+#    - Periodically scan every repository within the LFN umbrella projects (and induction-candidate repositories).
+#    - Collect critical health metrics, including commit activity, contributor engagement, release history, and lifecycle status.
+#    - Initially designed to operate without requiring elevated permissions or special GitHub GraphQL scopes, ensuring secure, transparent, and community-friendly operation.
+
+#  • **Lifecycle Classification:**
+#    - Clearly categorize repositories into one of seven TAC-defined lifecycle phases:
+#      1. Spark (Candidate/New)
+#      2. Incubation
+#      3. Active Development
+#      4. Stable
+#      5. Maintenance/Long-Term Support (LTS)
+#      6. Archive
+#      7. Inaccessible (permissions issue or repository not found)
+#    - Provide a simple, community-readable summary for easy tracking and oversight by project maintainers, Program Managers (PMs), and the TAC.
+
+#  • **Friendly and Encouraging Community Engagement:**
+#    - Automatically create/update one GitHub issue per organization (project-level) with clear, friendly, and actionable next-step suggestions to improve their project's lifecycle status.
+#    - Issues will not impose strict deadlines, emphasizing encouragement and constructive guidance, with recommended quarterly check-ins for progress updates.
+#    - Repositories classified as "Archive" or "Inaccessible" are intentionally excluded from next-step issues as they have reached terminal states.
+
+#  FUTURE ENHANCEMENTS
+#  -------------------
+#  • **Security and Health:**
+#    - Incorporate OSSF Scorecard checks
+#    - Open tickets to the orgs (project-level) with helpful steps they can take to improve their current OSSF scorecard
+#    
+#  • **Governance and Leadership:**
+#    - Technical Steering Committee (TSC) membership is often submitted as a part of an Induction levels beyond Spark (and maybe even at spark), but they are not always maintained in GitHub.  With community agreement it may be easier to maintain in GitHub for automation, if we can agree on a standard
+
+#  • **Flexible TAC Lifecycle Adjustment:**
+#    - Provide a clear, documented mechanism to modify lifecycle states based on official TAC approvals (authentication of approvals currently outside workflow scope, maintained by LF staff or authorized community maintainers for now discuss with community).
+
+#  READABILITY & MAINTAINABILITY
+#  -----------------------------
+#  This workflow is intentionally verbose and structured for readability and easy community collaboration. Community members are encouraged to contribute suggestions, enhancements, or adjustments to the logic to ensure continuous improvement and alignment with community goals.
+
 
 name: "LFN Project Governance Automation"
 
