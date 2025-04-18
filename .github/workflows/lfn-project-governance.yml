@@ -129,25 +129,29 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checks out each individual repo so its metadata can be read by the classify action
+      # Checkout this repository (which includes the classify-config directory)
+      - name: Checkout governance-automation repo
+        uses: actions/checkout@v4
+        with:
+          path: .
+
+      # Checkout the classify-config explicitly to ensure it's loaded as an action
+      - name: Ensure classify-config is present
+        run: ls -la .github/classify-config && test -f .github/classify-config/action.yml
+
+      # Checkout each individual target repo for metadata access
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: target-repo
 
-      # Checks out the automation repo so classify-config is available
-      - name: Checkout governance-automation repo
-        uses: actions/checkout@v4
-        with:
-          path: automation
-
       # Calls the local action in classify-config/ with inputs repo + config
       - name: Run classification action
-        uses: ./automation/.github/classify-config
+        uses: ./.github/classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config_path: automation/.github/workflows/classify-config.yml
+          config_path: .github/workflows/classify-config.yml
 
       # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
       - name: Sanitize artifact name
