@@ -129,25 +129,23 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checkout the governance automation repo to load the classify-config action
-      - name: Checkout governance-automation repo
+      # Checkout this repo so the local action is available relative to root
+      - name: Checkout root repo (governance-automation)
         uses: actions/checkout@v4
-        with:
-          path: governance-automation
 
-      # Checkout each target repo into a unique subdir so it doesn’t overwrite files
+      # Checkout the target project repo for classification
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
-          path: target-repo
+          path: repo
 
-      # Run the classify-config local action explicitly from known subdir
+      # Run the classify-config local action explicitly from known path
       - name: Run classification action
-        uses: ./governance-automation/.github/classify-config
+        uses: ./.github/classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config_path: governance-automation/.github/workflows/classify-config.yml
+          config_path: .github/workflows/classify-config.yml
 
       # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
       - name: Sanitize artifact name
@@ -160,7 +158,6 @@ jobs:
         with:
           name: "${{ steps.sanitize.outputs.safe_name }}.json"
           path: repo.json
-
 
 
   # ─────────────────────────────────────────────────────────────────────────────
