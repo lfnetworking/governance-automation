@@ -1,6 +1,7 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 const fs = require('fs');
+const config = require('js-yaml').load(fs.readFileSync(process.env.INPUT_CONFIG_PATH, 'utf8'));
 
 (async () => {
   try {
