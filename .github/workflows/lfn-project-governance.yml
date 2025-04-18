@@ -130,6 +130,9 @@ jobs:
       - name: Load classification thresholds from config
         run: cp .lfn/classify-config.yml ./classify-config.yml
 
+      - name: Convert classify config to JSON
+        run: yq -o=json '.phases' .lfn/classify-config.yml > classify-phases.json
+
       - name: Classify repo lifecycle
         uses: actions/github-script@v7
         with:
@@ -137,7 +140,7 @@ jobs:
           script: |
             const fs = require('fs');
             const yaml = require('js-yaml');
-            const config = yaml.load(fs.readFileSync('./classify-config.yml', 'utf8'));
+            const config = JSON.parse(fs.readFileSync('./classify-phases.json', 'utf8'));
             // Placeholder for actual lifecycle classification using thresholds from config
 
   publish-report:
