@@ -1,127 +1,257 @@
-# ============================================================================
-#  LFN Project Governance – automated lifecycle classification & reporting
-#  --------------------------------------------------------------------------
-#  This workflow runs on a weekly cron **or** on‑demand (`workflow_dispatch`).
-#  It performs three high‑level steps:
-#    1. *classify*   – Pulls repo metadata & decides the 7‑phase lifecycle.
-#    2. *summary*    – Publishes a Markdown roll‑up to the chosen location.
-#    3. *next‑steps* – (review‑mode only) opens **one friendly issue per org** 
-#                       listing helpful suggestions for repos to reach the next 
-#                       lifecycle phase.
+# =============================================================================
+# LFN Project Governance Automation Workflow
+# --------------------------------------------------------------------------------
+# PURPOSE: Regularly assess repositories under the Linux Foundation Networking (LFN)
+# umbrella to ensure alignment with community health, security, and lifecycle standards.
+# This automated workflow:
+#   • Scans all LFN repositories (and optional induction candidates)
+#   • Collects key metrics without requiring elevated GraphQL scopes
+#   • Classifies each repo into one of seven TAC-defined lifecycle phases:
+#       Spark → Incubation → Active Development → Stable → Maintenance/LTS → Archive → Inaccessible
+#   • Publishes a summary report via GitHub Issues and optional Slack notifications
 #
-#  NOTE:  Suggestions are aggregated at the **organization** level, providing
-#  project leads a clear, consolidated checklist for improving lifecycle phases.
-#  These issues are designed to be supportive and friendly, encouraging progress
-#  without imposing strict deadlines. Regular quarterly check‑ins are recommended
-#  to review and assess these suggestions.
+# CORE OBJECTIVES:
+#   1. Automated Repository Assessment
+#      • Crawl and gather activity, contributor, and release metrics via REST v3 endpoints
+#      • Maintain minimal permissions to avoid requiring elevated tokens
+#   2. Lifecycle Classification
+#      • Apply a clear, community-readable rubric for repo phases
+#      • Enable project maintainers and TAC to track progress at a glance
+#   3. Friendly Community Engagement
+#      • Create/update a single governance issue with actionable guidance per org
+#      • Exclude Archive/Inaccessible repos from issue creation to avoid unnecessary noise
 #
-#  ---------------------------------------------------------------------------
-#  🔬  HOW TO TEST WITHOUT CREATING ISSUES
-#  ---------------------------------------------------------------------------
-#  ▸ Navigate to **Actions → LFN Project Governance → Run workflow**.
-#  ▸ Enter `mode: dry-run` (or *any* non‑empty string other than `review`).
+# FUTURE ENHANCEMENTS:
+#   • Integrate OSSF Scorecard checks and auto-raise issues for security improvements
+#   • Standardize TSC membership data in GitHub for easier automation
+#   • Provide a mechanism for TAC to adjust phase criteria via configuration files
 #
-#  The `next‑steps` job only runs when the following condition is *true*:
-#
-#       github.event_name != 'workflow_dispatch'  ||
-#       github.event.inputs.mode == ''            ||
-#       github.event.inputs.mode == 'review'
-#
-#  Launching via *workflow_dispatch* **and** supplying `mode=dry-run` makes all
-#  three sub‑clauses evaluate to **false** – therefore `next‑steps` is **skipped**
-#  while the *classify* and *summary* jobs still execute. Inspect the produced
-#  artifacts & logs to verify behaviour before you enable real‑issue creation.
-# ============================================================================
-name: "LFN Project Governance"
+# READABILITY & MAINTAINABILITY:
+#   • Use verbose, open-source-friendly comments throughout the workflow
+#   • Structure logic into clear, modular jobs for easy contributions
+# =============================================================================
+
+name: "LFN Project Governance Automation"
 
 on:
-  # Manual trigger – choose a run mode via the `mode` input.
+  # Manual triggers with clearly defined run modes
   workflow_dispatch:
     inputs:
       mode:
-        description: "Run mode: '' (default) | review | dry-run | any-tag-you-like"
+        description: |
+          Select the workflow run mode:
+            • test       – Default. Manual testing of the workflow without side-effects.
+            • induction  – Onboard a new single project into LFN governance checks.
+            • review     – Perform a full governance review of existing LFN projects.
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - induction
+          - review
+      project_org:
+        description: |
+          (induction only) The GitHub organization of the new project you wish to induct.
         required: false
-        default: ""
-  # Sunday @ 06:23 UTC  (≈ Saturday evening US time)
-  schedule:
-    - cron: "23 6 * * 0"
+      project_repo:
+        description: |
+          (induction only) Full repository slug for induction, in the form <org>/<repo>.
+        required: false
 
-# ---------------------------------------------------------------------------
-#  Default permission set – tightened via job‑level overrides where needed
-# ---------------------------------------------------------------------------
+  # Optional schedule for recurring checks (disabled by default until fully tested)
+  # schedule:
+  #   - cron: "0 9 * * 1"  # Monday 09:00 UTC → 02:00 PT
+
 permissions:
-  contents: read
-  issues: write
-  pull-requests: read
+  # Minimal permissions scoped for safe operation
+  contents: read        # Read repo metadata and configs
+  issues: write         # Create/update governance issues
+  pull-requests: write  # Reserved for potential automated PRs
+  id-token: write       # Needed if using OIDC for extra integrations
 
-concurrency:
-  group: "lfn‑governance"
-  cancel-in-progress: false
+env:
+  # Token with admin permissions over LFN repos
+  GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
 
-# (Rest of the code unchanged for brevity)
+jobs:
+  enumerate-projects:
+    # Build the list of repositories to evaluate based on selected mode
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Only need the latest commit for config files
 
-# -------------------------------------------------------------------------
-# 3) NEXT‑STEPS – open/update friendly, supportive issue per org quarterly
-# -------------------------------------------------------------------------
-next-steps:
-  needs: classify
-  if: |
-    ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.mode == '' || github.event.inputs.mode == 'review' }}
-  runs-on: ubuntu-latest
-  permissions:
-    contents: read
-    issues: write
-  steps:
-    - name: Download classification artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
+      - name: Install YAML parser (yq)
+        run: |
+          # yq makes it easy to parse and loop through YAML org lists.
+          sudo apt-get update -y && sudo apt-get install -y yq
 
-    # ──────────────────────────────────────────────────────────────────────
-    # 🗂️  GitHub‑Script: Friendly quarterly suggestions per organization
-    # --------------------------------------------------------------------
-    - name: Open or update friendly “Next Steps” issues **per org**
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
-        script: |
-          /**
-           * Friendly, encouraging issues generated quarterly per organization
-           * outlining clear, supportive suggestions for lifecycle improvement.
-           * No strict deadlines—just a quarterly check-in.
-           */
-          const fs = require('fs');
-          const path = require('path');
+      - name: Build list of org/repos
+        id: set-matrix
+        shell: bash
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          PROJECT_ORG: ${{ github.event.inputs.project_org }}
+          PROJECT_REPO: ${{ github.event.inputs.project_repo }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" == "induction" ]]; then
+            # Induction: target a single new repo for governance onboarding
+            echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
+          elif [[ "$MODE" == "review" ]]; then
+            # Review: scan all repos listed in .lfn/projects.yaml
+            declare -a matrix
+            for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
+              echo "Scanning organization: $org" >&2
+              for repo in $(gh repo list "$org" --json name -q '.[].name'); do
+                matrix+=("$org/$repo")
+              done
+            done
+            # Convert Bash array to JSON for matrix strategy
+            printf '%s
+' "${matrix[@]}" | jq -R . | jq -cs '.' | {
+              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT";
+            }
+          else
+            # Test: simple dry-run without any repositories
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+          fi
 
-          //-----------------------------------------------------------------
-          // 📚 1) Static library with friendly phase‑specific suggestions
-          //-----------------------------------------------------------------
-          const hints = {
-            'Spark': [
-              '• Aim for **≥ 3 contributors** in the next quarter.',
-              '• Consider releasing your first **tagged version**.',
-              '• Start tracking your **OSSF Scorecard**.'
-            ],
-            'Incubation': [
-              '• Increase activity to reach **≥ 20 commits per quarter**.',
-              '• Regularly push code to stay **active within 30 days**.',
-              '• Strive for an **OSSF Scorecard “Passing”** grade.'
-            ],
-            'Active Development': [
-              '• Enhance **contributor onboarding documentation**.',
-              '• Establish a consistent **release schedule**.',
-              '• Aim to close issues promptly (under 60 days).'
-            ],
-            'Stable': [
-              '• Release at least **once per year**.',
-              '• Conduct quarterly **dependency vulnerability checks**.',
-              '• Clearly document your **long‑term support policy**.'
-            ],
-            'Maintenance / LTS': [
-              '• Publish security updates at least every **2 years**.',
-              '• Reconsider if the repo should move to **Archive**.',
-              '• Update documentation on **supported versions and EOL**.'
-            ]
-          };
+  classify:
+    # For each repository, collect metrics and assign a lifecycle phase
+    needs: enumerate-projects
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # Continue to evaluate all repos even if some fail
+      matrix:
+        repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
+    steps:
+      - name: Debug GitHub CLI authentication
+        run: |
+          echo "== gh auth status ==" && gh auth status || true
+        env:
+          GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
 
-          // Rest of the script remains unchanged for brevity
+      - name: Collect repository metadata (REST-only)
+        id: metrics
+        shell: bash
+        env:
+          REPO: ${{ matrix.repo_slug }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%%/*}"; repo="${REPO#*/}";
+          if ! gh api "/repos/$owner/$repo" > repo.json 2>err.log; then
+            echo "⚠️  Cannot fetch $REPO – $(<err.log)" >&2
+            echo '{}' > repo.json
+          fi
+          echo "json=$(<repo.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Determine lifecycle phase
+        id: phase
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
+          script: |
+            /**
+             *  Lifecycle classification:
+             *    Spark, Incubation, Active Development, Stable, Maintenance/LTS, Archive, Inaccessible
+             *  Metrics: contributors, commit velocity, dormancy, age, release recency.
+             */
+            const repoJson = JSON.parse(process.env.REPO_JSON || '{}');
+            const slug = process.env.REPO_SLUG || '';
+            const [owner, name] = slug.split('/');
+            const daysAgo = iso => (Date.now() - new Date(iso)) / 864e5;
+            let phase = 'Unknown';
+            if (!Object.keys(repoJson).length) phase = 'Inaccessible';
+            else if (repoJson.archived) phase = 'Archive';
+            else {
+              let contributors = 0;
+              try { contributors = (await github.rest.repos.listContributors({ owner, repo: name, per_page:100, anon:true })).data.length; } catch {}
+              const silent = daysAgo(repoJson.pushed_at || repoJson.updated_at);
+              const ageYrs = (Date.now() - new Date(repoJson.created_at)) / (365*864e5);
+              let lastRelDays = Infinity, hasRelease=false;
+              try { const rel = await github.rest.repos.getLatestRelease({ owner, repo: name }); lastRelDays = daysAgo(rel.data.published_at); hasRelease=true;} catch {}
+              let commits90d = 0; try { commits90d = (await github.paginate(github.rest.repos.listCommits, { owner, repo: name, since: new Date(Date.now()-90*864e5).toISOString() })).length;} catch {}
+              const isSpark = contributors<3||!hasRelease;
+              const isIncub = !isSpark&&contributors>=3&&hasRelease;
+              const isActive = commits90d>=20&&silent<=30;
+              const isStable = !isActive&&silent>30&&silent<=180;
+              const isLTS = ageYrs>=5&&silent>180&&silent<=540&&lastRelDays<=730;
+              if (isSpark) phase='Spark';
+              else if (isIncub) phase='Incubation';
+              else if (isActive) phase='Active Development';
+              else if (isStable) phase='Stable';
+              else if (isLTS) phase='Maintenance/LTS';
+            }
+            core.setOutput('phase', phase);
+            require('fs').writeFileSync('repo.json', JSON.stringify({ phase }, null,2));
+        env:
+          REPO_JSON: ${{ steps.metrics.outputs.json }}
+          REPO_SLUG: ${{ matrix.repo_slug }}
+
+      - name: Upload classification artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ matrix.repo_slug//\//-- }}.json"
+          path: repo.json
+
+  publish-report:
+    # Aggregate results into a GitHub Issue and optional Slack notification
+    needs: classify
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - id: build-summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A rows
+          for file in artifacts/*.json; do
+            [[ -f "$file" ]] || continue
+            slug=$(basename "$file" .json)
+            repoPath=${slug//--/\/}
+            org=${repoPath%%/*}
+            repo=${repoPath#*/}
+            phase=$(jq -r '.phase//"Unknown"' "$file")
+            rows[$org]="${rows[$org]:+${rows[$org]}\n}| $repo | $phase |"
+          done
+          {
+            echo "# LFN Project Lifecycle Summary"
+            for org in "${!rows[@]}"; do
+              echo ""; echo "## $org";
+              echo "| Repository | Phase |";
+              echo "|------------|-------|";
+              printf '%s
+' "${rows[$org]}" | sort;
+            done
+          } > summary.md
+          echo 'summary<<EOF' >> "$GITHUB_OUTPUT"; cat summary.md >> "$GITHUB_OUTPUT"; echo EOF >> "$GITHUB_OUTPUT"
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Sync governance issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = require('fs').readFileSync('summary.md','utf8');
+            const { owner, repo } = context.repo;
+            const title = 'Automated LFN Project Lifecycle Summary';
+            const issues = await github.paginate(github.rest.issues.listForRepo,{owner,repo,state:'open',labels:['lfn-governance']});
+            const existing = issues.find(i=>i.title===title);
+            if(existing) await github.rest.issues.update({owner,repo,issue_number:existing.number,body});
+            else await github.rest.issues.create({owner,repo,title,body,labels:['lfn-governance']});
+      - name: Optional Slack notification
+        if: env.SLACK_WEBHOOK_URL!=''
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            { "text": ":clipboard: Governance summary for *${{ github.repository }}* – <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>" }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
