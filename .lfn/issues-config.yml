@@ -1,0 +1,76 @@
+# Issue configuration for lifecycle phases
+# Customize friendly and actionable quarterly suggestions for each lifecycle phase.
+# No strict deadlines—these issues are intended for supportive guidance and community improvement.
+
+issues:
+  spark:
+    title: "🌟 Spark Phase - Next Steps Recommendations"
+    assignees: ["@lfn-org-project-owner"]  # Default assignee, update as needed
+    labels: ["lifecycle", "spark"]
+    body: |
+      Your project is currently in the **Spark phase**. Here are friendly, quarterly suggestions to help advance your project:
+      - Aim for **≥ 3 contributors** in the next quarter.
+      - Consider releasing your first **tagged version**.
+      - Start tracking your **OSSF Scorecard**.
+
+      ---
+      **Relevant Project Report:**
+      <!-- Insert relevant part of the automated report here -->
+
+  incubation:
+    title: "🚀 Incubation Phase - Growth Suggestions"
+    assignees: ["@lfn-org-project-owner"]
+    labels: ["lifecycle", "incubation"]
+    body: |
+      Your project is now in **Incubation**! To further stabilize and grow your community:
+      - Increase activity to reach **≥ 20 commits per quarter**.
+      - Regularly push code to stay **active within 30 days**.
+      - Strive for an **OSSF Scorecard “Passing”** grade.
+
+      ---
+      **Relevant Project Report:**
+      <!-- Insert relevant part of the automated report here -->
+
+  active:
+    title: "🔥 Active Development - Sustaining Momentum"
+    assignees: ["@lfn-org-project-owner"]
+    labels: ["lifecycle", "active-development"]
+    body: |
+      Great momentum! You're in **Active Development**. Recommendations to sustain and build your community:
+      - Enhance **contributor onboarding documentation**.
+      - Establish a consistent **release schedule**.
+      - Aim to close issues promptly (under 60 days).
+
+      ---
+      **Relevant Project Report:**
+      <!-- Insert relevant part of the automated report here -->
+
+  stable:
+    title: "🌳 Stable Phase - Community Health Checks"
+    assignees: ["@lfn-org-project-owner"]
+    labels: ["lifecycle", "stable"]
+    body: |
+      Your project is in a healthy, **Stable** state. To maintain interest and support your community:
+      - Release at least **once per year**.
+      - Conduct quarterly **dependency vulnerability checks**.
+      - Clearly document your **long-term support policy**.
+
+      ---
+      **Relevant Project Report:**
+      <!-- Insert relevant part of the automated report here -->
+
+  maintenance_lts:
+    title: "🛠 Maintenance/LTS - Long-Term Viability"
+    assignees: ["@lfn-org-project-owner"]
+    labels: ["lifecycle", "maintenance", "LTS"]
+    body: |
+      Your project is in the **Maintenance/LTS phase**. Ensure its longevity by:
+      - Publishing security updates at least every **2 years**.
+      - Reassessing periodically whether to move to the **Archive**.
+      - Updating documentation on **supported versions and end-of-life (EOL)**.
+
+      ---
+      **Relevant Project Report:**
+      <!-- Insert relevant part of the automated report here -->
+
+# No issues created for "archive" or "inaccessible" phases as these are terminal states.
