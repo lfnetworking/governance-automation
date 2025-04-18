@@ -101,17 +101,14 @@ jobs:
           PROJECT_REPO: ${{ github.event.inputs.project_repo }}
         run: |
           if [[ "$MODE" == "induction" ]]; then
-            # Single repo provided manually (e.g. onboarding a new project)
             echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
           else
-            # Collect all repos from the defined list of orgs in project config
             declare -a matrix
             for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
               for repo in $(gh repo list "$org" --json name -q '.[].name'); do
                 matrix+=("$org/$repo")
               done
             done
-            # Return matrix as a JSON array
             printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
               read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; }
           fi
@@ -127,10 +124,8 @@ jobs:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-      - name: Load classification thresholds from config
-        run: cp .lfn/classify-config.yml ./classify-config.yml
 
-      - name: Convert classify config to JSON
+      - name: Convert classify-config.yml to JSON for JS-safe loading
         run: yq -o=json '.phases' .lfn/classify-config.yml > classify-phases.json
 
       - name: Classify repo lifecycle
@@ -139,7 +134,6 @@ jobs:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
             const fs = require('fs');
-            const yaml = require('js-yaml');
             const config = JSON.parse(fs.readFileSync('./classify-phases.json', 'utf8'));
             // Placeholder for actual lifecycle classification using thresholds from config
 
@@ -212,15 +206,15 @@ jobs:
     if: ${{ github.event.inputs.mode != 'test' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Load issue config
-        run: cp .lfn/issues-config.yml ./issues-config.yml
+
+      - name: Convert issue config to JSON
+        run: yq -o=json '.issues' .lfn/issues-config.yml > issues.json
+
       - name: Create or update lifecycle issues per org
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.LFN_ADMIN_TOKEN }}
           script: |
             const fs = require('fs');
-            const yaml = require('js-yaml');
-            const config = yaml.load(fs.readFileSync('./issues-config.yml', 'utf8'));
-            // Placeholder for future per-phase issue logic
-
+            const issueConfig = JSON.parse(fs.readFileSync('./issues.json', 'utf8'));
+            // Placeholder for future per-phase issue logic using issueConfig
