@@ -103,9 +103,9 @@ on:
       mode:
         description: "Choose the run mode"
         required: true
-        default: "review"
+        default: "test"
         type: choice
-        options: [review, induction]
+        options: [test, review, induction]
       project_org:
         description: "(induction) GitHub org where the new project lives"
         required: false
@@ -125,6 +125,10 @@ env:
   GH_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 📦 Enumerate Projects: Builds the list of repositories to process based on
+  #     .lfn/projects.yaml or specific project slug (for induction mode)
+  # ─────────────────────────────────────────────────────────────────────────────
   enumerate-projects:
     runs-on: ubuntu-latest
     outputs:
@@ -160,6 +164,10 @@ jobs:
               read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix: $json" >&2; }
           fi
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 🧪 Classify: Uses lifecycle thresholds from classify-config.yml and applies
+  #     them dynamically to each repository in the matrix
+  # ─────────────────────────────────────────────────────────────────────────────
   classify:
     needs: enumerate-projects
     runs-on: ubuntu-latest
@@ -187,6 +195,10 @@ jobs:
           name: "${{ matrix.repo_slug//\//-- }}.json"
           path: repo.json
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 📝 Publish Report: Builds markdown summary of repo statuses across orgs and
+  #     posts to governance issue
+  # ─────────────────────────────────────────────────────────────────────────────
   publish-report:
     needs: classify
     runs-on: ubuntu-latest
@@ -209,10 +221,10 @@ jobs:
             project=${full%%/*}
             repo=${full#*/}
             if [[ -f "$dir/repo.json" ]]; then
-  phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
-else
-  phase="Unknown"
-fi
+              phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
+            else
+              phase="Unknown"
+            fi
             if [[ -n "${rows[$project]:-}" ]]; then rows[$project]+=$'\n'; fi
             rows[$project]+="| $repo | $phase |"
           done
