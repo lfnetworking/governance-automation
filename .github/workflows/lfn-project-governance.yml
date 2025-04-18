@@ -208,7 +208,7 @@ jobs:
             full=${slug//--/\/}
             project=${full%%/*}
             repo=${full#*/}
-            phase=$(jq -r '.phase // "Unknown"' "$dir/repo.json" 2>/dev/null || echo Unknown)
+            phase=$( [ -f \"$dir/repo.json\" ] && jq -r '.phase // \"Unknown\"' \"$dir/repo.json\" || echo \"Unknown\" )
             if [[ -n "${rows[$project]:-}" ]]; then rows[$project]+=$'\n'; fi
             rows[$project]+="| $repo | $phase |"
           done
