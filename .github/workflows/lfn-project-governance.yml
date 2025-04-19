@@ -300,85 +300,83 @@ jobs:
         id: build-md
         shell: bash
         run: |
-          # Corrected run script for 'Build Markdown Report' step
-          set -euo pipefail
-          # Check if jq is installed, install if necessary
-          if ! command -v jq &> /dev/null; then
-            echo "jq not found, installing..." >&2
-            sudo apt-get update -y && sudo apt-get install -y jq
+      # Corrected run script for 'Build Markdown Report' step
+      set -euo pipefail
+      # Check if jq is installed, install if necessary
+      if ! command -v jq &> /dev/null; then
+        echo "jq not found, installing..." >&2
+        sudo apt-get update -y && sudo apt-get install -y jq
+      fi
+    
+      declare -A rows_data # Use associative array to store lines per project
+      echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
+      # Loop through artifact directories created by download-artifact
+      # Structure is artifacts/<artifact-name>/repo.json
+      find artifacts -mindepth 2 -maxdepth 2 -name 'repo.json' -print0 | while IFS= read -r -d $'\0' file; do
+        dir=$(dirname "$file")
+        slug=$(basename "$dir")
+        echo "Processing artifact directory: $dir, Slug: $slug" >&2
+        # Restore original slug format
+        full=${slug//--/\/}
+        project=${full%%/*}
+        repo=${full#*/}
+    
+        if [[ -f "$file" ]]; then
+          phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
+          # Handle potential jq errors or null values explicitly
+          if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
+            phase="Unknown"
+            echo "Warning: Could not parse phase or phase was null in $file. Setting to Unknown." >&2
           fi
-
-          declare -A rows_data # Use a different name for clarity
-          echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
-          # Loop through artifact directories created by download-artifact
-          # Structure is artifacts/<artifact-name>/repo.json
-          find artifacts -mindepth 2 -maxdepth 2 -name 'repo.json' -print0 | while IFS= read -r -d $'\0' file; do
-            dir=$(dirname "$file")
-            slug=$(basename "$dir")
-            echo "Processing artifact directory: $dir, Slug: $slug" >&2
-            # Restore original slug format
-            full=${slug//--/\/}
-            project=${full%%/*}
-            repo=${full#*/}
-
-            if [[ -f "$file" ]]; then
-              phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
-              # Handle potential jq errors or null values explicitly
-              if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
-                phase="Unknown"
-                echo "Warning: Could not parse phase or phase was null in $file. Setting to Unknown." >&2
-              fi
-            else
-              # This case should ideally not happen if upload succeeded
-              phase="Unknown (Missing JSON)"
-              echo "Warning: repo.json not found in $dir" >&2
-            fi
-
-            # Append raw data line for later sorting, using newline as separator
-            row_line="| $repo | $phase |"
-            # Append row, handling potential newline issues if rows_data[$project] was previously empty
-            if [[ -z "${rows_data[$project]:-}" ]]; then
-              rows_data[$project]="$row_line"
-            else
-              # Use a unique separator like newline for splitting later
-              rows_data[$project]+=$'\n'"$row_line"
-            fi
+        else
+          phase="Unknown (Missing JSON)"
+          echo "Warning: repo.json not found in $dir" >&2
+        fi
+    
+        # Store the formatted table row, keyed by project
+        row_line="| $repo | $phase |"
+        # Append using newline as a separator for multi-line values
+        if [[ -z "${rows_data[$project]:-}" ]]; then
+          rows_data[$project]="$row_line"
+        else
+          rows_data[$project]+=$'\n'"$row_line"
+        fi
+      done
+    
+      # Check if any rows were generated
+      if [ ${#rows_data[@]} -eq 0 ]; then
+        echo "WARNING: No valid artifact data found to generate report." >&2
+        echo "# LFN Project Lifecycle Summary" > summary.md
+        echo "" >> summary.md
+        echo "*No project data processed successfully.*" >> summary.md
+      else
+        # Now generate the markdown AFTER collecting all data
+        {
+          echo "# LFN Project Lifecycle Summary"
+          # Sort projects alphabetically by iterating through sorted keys
+          for project in $(printf '%s\n' "${!rows_data[@]}" | sort); do
+            echo
+            echo "## $project"
+            echo "| Repository | Phase |"
+            echo "|------------|-------|"
+            # Print the stored lines for this project, sorting them by repo name (second field)
+            printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2
           done
-
-          # Check if any rows were generated
-          if [ ${#rows_data[@]} -eq 0 ]; then
-            echo "WARNING: No valid artifact data found to generate report." >&2
-            echo "# LFN Project Lifecycle Summary" > summary.md
-            echo "" >> summary.md
-            echo "*No project data processed successfully.*" >> summary.md
-          else
-            # Now generate the markdown AFTER collecting all data
-            {
-              echo "# LFN Project Lifecycle Summary"
-              # Sort projects alphabetically
-              for project in $(printf '%s\n' "${!rows_data[@]}" | sort); do
-                echo
-                echo "## $project"
-                echo "| Repository | Phase |"
-                echo "|------------|-------|"
-                # Print the stored lines for this project, sorting them by repo name (second field)
-                printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2
-              done
-            } > summary.md
-          fi
-
-          echo "Generated summary.md:" >&2
-          cat summary.md >&2
-
-          # Set output using recommended heredoc approach
-          {
-            echo 'summary<<EOF'
-            cat summary.md
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-          # Add to job summary for easy viewing in Actions UI
-          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+        } > summary.md
+      fi
+    
+      echo "Generated summary.md:" >&2
+      cat summary.md >&2
+    
+      # Set output using recommended heredoc approach
+      {
+        echo 'summary<<EOF'
+        cat summary.md
+        echo 'EOF'
+      } >> "$GITHUB_OUTPUT"
+    
+      # Add to job summary for easy viewing in Actions UI
+      cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # Updates or creates a governance issue on the repo with the report content
       - name: Create or update governance issue
