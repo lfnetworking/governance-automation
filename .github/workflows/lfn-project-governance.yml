@@ -5,7 +5,6 @@
 #  -------
 #  This workflow aims to provide consistency and engagement to the governance and health-check processes for Projects across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC). This information will be helpful to the Members of the Board when making strategic decisions. 
 #  The timing of the assessment would depend on their lifecycle phase and the metrics being checked. The timing will need to be customizable by the TAC.
-
 #  CORE OBJECTIVES
 #  ---------------
 #  • **Automated Repository Assessment:**
@@ -165,7 +164,7 @@ jobs:
       - name: DEBUG - Check Checkout Outcome and Conclusion
         if: always() # Ensure this runs even if checkout failed
         run: |
-          echo "Outcome of step 'checkout_target': [${{ steps.checkout_target.outcome }}]"
+          echo "Outcome of step 'checkout_target': [${{ steps.checkout_target.conclusion }}]"
           echo "Conclusion of step 'checkout_target': [${{ steps.checkout_target.conclusion }}]" # Also check conclusion, might be more reliable
           echo "------------------------------------"
       # --- END OF NEW DEBUG STEP ---
@@ -175,16 +174,16 @@ jobs:
         # ... keep the modified run script checking outcome ...
         run: |
           phase_value="Unknown"
-          if [[ "${{ steps.checkout_target.outcome }}" != "success" ]]; then # Keep using outcome here for now
+          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then # Keep using outcome here for now
             phase_value="Checkout Failed"
-            echo "::warning::Target repository checkout failed (outcome: ${{ steps.checkout_target.outcome }}). Setting phase to Checkout Failed."
+            echo "::warning::Target repository checkout failed (outcome: ${{ steps.checkout_target.conclusion }}). Setting phase to Checkout Failed."
           fi
           echo "{\"phase\": \"${phase_value}\"}" > repo.json
           echo "Created initial repo.json with phase: ${phase_value}"
 
       # Step 5: Setup Node.js (Keep using outcome for condition)
       - name: Setup Node.js
-        if: steps.checkout_target.outcome == 'success' # <<< Let's see what outcome is first
+        if: steps.checkout_target.conclusion == 'success' # <<< Let's see what outcome is first
         uses: actions/setup-node@v4
         with:
           node-version: '16'
