@@ -199,7 +199,7 @@ jobs:
         working-directory: ${{ github.workspace }}/classify-config
 
       # Step 2.4: Process all repositories within the current organization.
-      # This script now includes explicit error checking for each repo.
+      # This script now includes explicit error checking and debug tracing (set -x).
       - name: Process Repositories for Org ${{ matrix.org }}
         shell: bash
         env:
@@ -207,8 +207,8 @@ jobs:
           INDUCTION_REPO_SLUG: ${{ github.event.inputs.project_repo }}
           MODE: ${{ github.event.inputs.mode || 'review' }}
         run: |
-          # Removed 'set -e'. We will check exit codes explicitly.
-          # set -e
+          # Enable command tracing for detailed debugging output
+          set -x
 
           current_org="${{ matrix.org }}"
           config_path=".github/workflows/classify-config.yml" # Relative path within checked out code
@@ -274,11 +274,13 @@ jobs:
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
             # Capture output AND exit code separately
-            git_output=$(git clone --depth 1 "https://github-actions:${{ env.GITHUB_TOKEN }}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1)
+            # Added || true to prevent immediate exit if clone fails, rely on exit code check
+            git_output=$(git clone --depth 1 "https://github-actions:${{ env.GITHUB_TOKEN }}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1 || true)
             git_exit_code=$?
 
             phase_value="Unknown"
             checkout_successful=false
+            # Check exit code explicitly
             if [[ $git_exit_code -eq 0 ]]; then
               echo "Clone successful." >&2
               checkout_successful=true
@@ -295,12 +297,14 @@ jobs:
             if [[ "$checkout_successful" == true ]]; then
               echo "Running classification script for $repo_slug..." >&2
               # Execute the Node.js script directly, capture exit code
+              # Added || true to prevent immediate exit if node fails, rely on exit code check
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
               GITHUB_TOKEN="${{ env.GITHUB_TOKEN }}" \
-              node "${{ github.workspace }}/classify-config/index.js"
+              node "${{ github.workspace }}/classify-config/index.js" || true
               node_exit_code=$?
 
+              # Check exit code explicitly
               if [[ $node_exit_code -ne 0 ]]; then
                  echo "::error::Classification script failed for $repo_slug with exit code $node_exit_code."
                  phase_value="Classification Error"
@@ -311,13 +315,17 @@ jobs:
               elif [[ -f "${{ github.workspace }}/repo.json" ]]; then
                  mv "${{ github.workspace }}/repo.json" "$result_json_path"
                  echo "Classification script ran, result moved to $result_json_path" >&2
+                 # Read phase, handle read errors
                  phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
                  if [[ "$phase_value" == "Read Error" ]]; then
                     echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
                     repo_failed=true
+                    # Overwrite result file with read error info
+                    printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
                  fi
               else
-                 echo "::error::Classification script did not produce repo.json for $repo_slug"
+                 # This case means node script succeeded (exit 0) but didn't create the file
+                 echo "::error::Classification script completed successfully but did not produce repo.json for $repo_slug"
                  phase_value="Classification Error"
                  repo_failed=true
                  printf '{"phase": "%s", "error": "Classification script did not produce output file"}\n' "$phase_value" > "$result_json_path"
@@ -331,10 +339,15 @@ jobs:
             if [[ ! -f "$result_json_path" ]]; then
                echo "::error::Result file $result_json_path not found for $repo_slug. Cannot upload artifact."
                repo_failed=true
+               # Optionally create a placeholder artifact if needed by publish-report
+               # printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
+               # gh artifact upload "$result_json_path" --name "$artifact_name" || true
             else
                echo "Uploading artifact $artifact_name..." >&2
-               gh artifact upload "$result_json_path" --name "$artifact_name"
+               # Added || true to prevent immediate exit if upload fails, rely on exit code check
+               gh artifact upload "$result_json_path" --name "$artifact_name" || true
                gh_artifact_exit_code=$?
+               # Check exit code explicitly
                if [[ $gh_artifact_exit_code -ne 0 ]]; then
                  echo "::error::Failed to upload artifact $artifact_name for $repo_slug. gh exit code: $gh_artifact_exit_code"
                  repo_failed=true # Mark repo as failed if upload fails
@@ -354,15 +367,18 @@ jobs:
             rm -rf "$target_repo_path"
             echo "--- Finished processing repository: $repo_slug ---" >&2
 
+            # Optional: Add a small delay to avoid hitting API rate limits too quickly
+            # sleep 1
+
           done # End of loop through repos for the org
 
           echo "Finished processing Org ${current_org}. Processed: $repo_processed_count, Errors: $repo_error_count." >&2
 
-          # Optionally, fail the job if any repo failed within the org
-          # if [[ $repo_error_count -gt 0 ]]; then
-          #   echo "::error::Encountered $repo_error_count errors while processing repositories for $current_org."
-          #   exit 1
-          # fi
+          # Decide if the job should fail if any repo had an error
+          if [[ $repo_error_count -gt 0 ]]; then
+            echo "::error::Encountered $repo_error_count errors while processing repositories for $current_org."
+            # exit 1 # Uncomment this line to make the whole org job fail if any repo fails
+          fi
 
 
   # =============================================================================
@@ -421,6 +437,8 @@ jobs:
                 # If jq failed or phase is empty/null, try reading error field
                 error_msg=$(jq -r '.error // ""' "$file" 2>/dev/null)
                 if [[ -n "$error_msg" ]]; then
+                   # Sanitize error message for Markdown table (optional)
+                   # error_msg=$(echo "$error_msg" | sed 's/|/\\|/g')
                    phase="Error: $error_msg" # Use error message as phase
                 else
                    phase="Unknown (Parse Error)" # Fallback if no error field
@@ -464,8 +482,8 @@ jobs:
                 echo "## $project"
                 echo "| Repository | Phase |"
                 echo "|------------|-------|"
-                # Sort rows: Errors first, then by phase, then by repo name
-                mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | awk -F'|' '{ if ($3 ~ /Error|Failed|Unknown/) print "0"$0; else print "1"$0 }' | sort -t'|' -k1,1 -k3,3 -k2,2 | sed 's/^.//')
+                # Sort rows: Errors/Unknown first, then by phase, then by repo name
+                mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /^Error|^Unknown|^Checkout Failed|^Classification Error/) print "0"$0; else print "1"$0 }' | sort -t'|' -k1,1 -k3,3 -k2,2 | sed 's/^.//')
                 printf '%s\n' "${sorted_lines[@]}"
               done
             } > summary.md
