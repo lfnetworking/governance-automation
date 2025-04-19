@@ -153,30 +153,38 @@ jobs:
 
       # Step 3: Checkout target repo
       - name: Checkout target repo
-        id: checkout_target # <<< ADD THIS ID
+        id: checkout_target # Step ID must be here
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: repo
           fetch-depth: 1
-        continue-on-error: true # <<< Placement looks correct in your uploaded file
+        continue-on-error: true
 
-      # Step 4: Create default/error result file (Modified)
-      - name: Create default/error result file
-        # No id needed now unless used elsewhere
+      # --- ADD THIS NEW DEBUG STEP ---
+      - name: DEBUG - Check Checkout Outcome and Conclusion
+        if: always() # Ensure this runs even if checkout failed
         run: |
-          phase_value="Unknown" # Default if checkout succeeded but classification might fail later
-          # Check the OUTCOME of the checkout step directly
-          if [[ "${{ steps.checkout_target.outcome }}" != "success" ]]; then
+          echo "Outcome of step 'checkout_target': [${{ steps.checkout_target.outcome }}]"
+          echo "Conclusion of step 'checkout_target': [${{ steps.checkout_target.conclusion }}]" # Also check conclusion, might be more reliable
+          echo "------------------------------------"
+      # --- END OF NEW DEBUG STEP ---
+
+      # Step 4: Create default/error result file (modified logic)
+      - name: Create default/error result file
+        # ... keep the modified run script checking outcome ...
+        run: |
+          phase_value="Unknown"
+          if [[ "${{ steps.checkout_target.outcome }}" != "success" ]]; then # Keep using outcome here for now
             phase_value="Checkout Failed"
             echo "::warning::Target repository checkout failed (outcome: ${{ steps.checkout_target.outcome }}). Setting phase to Checkout Failed."
           fi
           echo "{\"phase\": \"${phase_value}\"}" > repo.json
-          echo "Created initial repo.json with phase: ${phase_value}"  
+          echo "Created initial repo.json with phase: ${phase_value}"
 
-      # Step 5: Setup Node.js (Updated 'if' condition)
+      # Step 5: Setup Node.js (Keep using outcome for condition)
       - name: Setup Node.js
-        if: steps.checkout_target.outcome == 'success' # <<< UPDATED CONDITION
+        if: steps.checkout_target.outcome == 'success' # <<< Let's see what outcome is first
         uses: actions/setup-node@v4
         with:
           node-version: '16'
