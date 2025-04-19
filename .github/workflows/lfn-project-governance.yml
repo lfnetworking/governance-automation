@@ -155,10 +155,10 @@ jobs:
       - name: Checkout target repo # Indented 2 spaces
         uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.repo_slug }}
-          path: repo
-          fetch-depth: 1
-        continue-on-error: true
+          repository: ${{ matrix.repo_slug }} # Indented 4 spaces relative to "- name:"
+          path: repo                     # Indented 4 spaces relative to "- name:"
+          fetch-depth: 1                 # Indented 4 spaces relative to "- name:"
+          continue-on-error: true        # <<< SHOULD be indented 4 spaces relative to "- name:"
 
       # Step 4: Check if target repo checkout succeeded
       - name: Check if target repo checkout succeeded # Indented 2 spaces
