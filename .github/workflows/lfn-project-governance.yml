@@ -92,7 +92,7 @@ jobs:
 
       # Installs yq so YAML can be parsed in shell script below
       - name: Install yq
-        run: sudo apt-get update -y && sudo apt-get install -y yq
+        run: sudo apt-get update -y && sudo apt-get install -y yq jq # Also ensure jq is installed here
 
       # Create the matrix of repos to scan. If mode is 'induction' use input slug, else scan .lfn config
       - name: Build repo matrix
@@ -104,32 +104,27 @@ jobs:
           PROJECT_REPO: ${{ github.event.inputs.project_repo }}
         run: |
           set -euo pipefail
-          # Ensure essential tools are installed (moved check here)
+          # Ensure gh is installed and authenticated if needed
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
-          if ! command -v jq &> /dev/null; then echo "ERROR: jq not found." >&2; exit 1; fi
-          if [[ ! -f ".lfn/projects.yaml" ]] && [[ "$MODE" != "induction" ]]; then echo "ERROR: .lfn/projects.yaml not found!" >&2; exit 1; fi
 
           if [[ "$MODE" == "induction" ]]; then
             if [[ -z "$PROJECT_REPO" ]]; then echo "ERROR: Project repo slug must be provided for induction mode." >&2; exit 1; fi
-            # Basic validation of slug format
             if ! echo "$PROJECT_REPO" | grep -q '/'; then echo "ERROR: Project repo slug must be in <org>/<repo> format." >&2; exit 1; fi
             echo "matrix=[\"${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
             echo "Matrix (Induction): [\"${PROJECT_REPO}\"]" >&2
           else
+            if [[ ! -f ".lfn/projects.yaml" ]]; then echo "ERROR: .lfn/projects.yaml not found!" >&2; exit 1; fi
             declare -a matrix
             for org in $(yq -r '.orgs[] // ""' .lfn/projects.yaml); do
               if [[ -z "$org" ]]; then continue; fi # Skip empty org entries
               echo "📦 Processing org: $org" >&2
-              repo_list_json=$(gh repo list "$org" --limit 1000 --json name -q '.' 2>/dev/null) # Increased limit
+              repo_list_json=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$org" --limit 1000 --json name -q '.' 2>/dev/null) # Pass token explicitly if needed
               if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
                  echo "WARNING: Failed to list repos for '$org' or org is empty/inaccessible." >&2
                  continue
               fi
-              # Add repos to matrix
               while IFS= read -r repo_name; do
-                 if [[ -n "$repo_name" ]]; then # Ensure repo name is not empty
-                    matrix+=("$org/$repo_name")
-                 fi
+                 if [[ -n "$repo_name" ]]; then matrix+=("$org/$repo_name"); fi
               done < <(echo "$repo_list_json" | jq -r '.[].name')
             done
 
@@ -138,9 +133,8 @@ jobs:
               exit 1
             fi
 
-            # Generate JSON matrix output
             printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
-              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix Size: ${#matrix[@]}" >&2; echo "Matrix Content: $json" >&2; }
+              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix Size: ${#matrix[@]}" >&2; echo "Matrix Content (sample): $(echo $json | cut -c 1-200)..." >&2; }
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +142,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   classify:
     needs: enumerate-projects
+    # Prevent running if the matrix is empty
     if: ${{ needs.enumerate-projects.outputs.matrix != '[]' && needs.enumerate-projects.outputs.matrix != '' }}
     runs-on: ubuntu-latest
     strategy:
@@ -201,7 +196,8 @@ jobs:
             phase_value="Checkout Failed"
             echo "::warning::Target repository checkout failed (conclusion: ${{ steps.checkout_target.conclusion }}). Setting phase to Checkout Failed."
           fi
-          echo "{\"phase\": \"${phase_value}\"}" > repo.json
+          # Ensure the JSON is valid even if phase_value contains special chars (unlikely here)
+          printf '{"phase": "%s"}\n' "$phase_value" > repo.json
           echo "Created initial repo.json with phase: ${phase_value}"
 
       # Step 5: Setup Node.js
@@ -298,7 +294,7 @@ jobs:
       - name: Build Markdown Report
         id: build-md
         shell: bash
-        # === CORRECTED SCRIPT FOR REPORT GENERATION ===
+        # --- CORRECTED BASH SCRIPT WITH mapfile ---
         run: |
           set -euo pipefail
           # Check if jq is installed, install if necessary
@@ -378,6 +374,7 @@ jobs:
 
           # Add to job summary for easy viewing in Actions UI
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
+        # --- END OF CORRECTED BASH SCRIPT ---
 
       # Updates or creates a governance issue on the repo with the report content
       - name: Create or update governance issue
