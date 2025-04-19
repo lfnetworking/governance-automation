@@ -2,7 +2,8 @@
 #  LFN Project Governance Automation Workflow
 #  --------------------------------------------------------------------------------
 #  PURPOSE
-#  -------\n#  This workflow aims to provide consistency and engagement to the governance and health-check processes for Projects across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC). This information will be helpful to the Members of the Board when making strategic decisions.
+#  -------
+#  This workflow aims to provide consistency and engagement to the governance and health-check processes for Projects across all Linux Foundation Networking (LFN) projects. It regularly assesses repositories under LFN's umbrella to ensure continuous alignment with community health, security standards, and lifecycle progression defined by the Technical Advisory Council (TAC). This information will be helpful to the Members of the Board when making strategic decisions.
 #  The timing of the assessment would depend on their lifecycle phase and the metrics being checked. The timing will need to be customizable by the TAC.
 
 #  CORE OBJECTIVES
@@ -239,10 +240,8 @@ jobs:
           # Loop through artifact directories created by download-artifact
           # Structure is artifacts/<artifact-name>/repo.json
 
-          # --- START FIX ---
           # Use process substitution (< <(...)) to read files without a subshell for the loop
           while IFS= read -r -d $'\0' file; do
-          # --- END FIX ---
             dir=$(dirname "$file")
             slug=$(basename "$dir") # Slug is like 'org--repo.json'
 
@@ -276,9 +275,7 @@ jobs:
             else
               rows_data[$project]+=$'\n'"$row_line"
             fi
-          # --- START FIX ---
           done < <(find artifacts -mindepth 2 -maxdepth 2 -name '*.json' -print0) # Find any .json file inside the artifact subdirs
-          # --- END FIX ---
 
           # Check if any rows were generated
           if [ ${#rows_data[@]} -eq 0 ]; then
@@ -344,6 +341,7 @@ jobs:
             const fs = require('fs');
             const path = require('path');
             const yaml = require('js-yaml');
+            const octokit = github.getOctokit(process.env.GITHUB_TOKEN); // Ensure octokit is initialized here
 
             const issuesConfigPath = process.env.ISSUES_CONFIG_PATH;
             const governanceIssueTitle = process.env.GOVERNANCE_ISSUE_TITLE;
@@ -376,31 +374,43 @@ jobs:
             core.info(`Found ${artifactDirs.length} artifact directories to process for issues.`);
 
             for (const artifactDirName of artifactDirs) {
-              const jsonFilePath = path.join(artifactsDir, artifactDirName, 'repo.json'); // Assuming the JSON is always named repo.json
+              // Construct the expected path to the JSON file within the artifact directory
+              const jsonFilePath = path.join(artifactsDir, artifactDirName, `${artifactDirName}.json`);
+              // --- Fallback: Check for repo.json if <artifactName>.json doesn't exist ---
+              let actualJsonPath = jsonFilePath;
               if (!fs.existsSync(jsonFilePath)) {
-                core.warning(`repo.json not found in artifact directory ${artifactDirName}, skipping issue creation.`);
-                continue;
+                  const fallbackPath = path.join(artifactsDir, artifactDirName, 'repo.json');
+                  if (fs.existsSync(fallbackPath)) {
+                      core.info(`Did not find ${artifactDirName}.json, using fallback repo.json in ${artifactDirName}`);
+                      actualJsonPath = fallbackPath;
+                  } else {
+                      core.warning(`Neither ${artifactDirName}.json nor repo.json found in artifact directory ${artifactDirName}, skipping issue creation.`);
+                      continue;
+                  }
               }
+              // --- End Fallback ---
+
 
               let repoData;
               try {
-                repoData = JSON.parse(fs.readFileSync(jsonFilePath, 'utf8'));
+                repoData = JSON.parse(fs.readFileSync(actualJsonPath, 'utf8'));
               } catch (e) {
-                core.warning(`Failed to parse ${jsonFilePath}: ${e.message}`);
+                core.warning(`Failed to parse ${actualJsonPath}: ${e.message}`);
                 continue;
               }
 
-              const repoSlug = repoData.repo; // Should be in "owner/repo" format from the classify action
-              const phase = repoData.phase;
+              // Restore original repo slug from artifact directory name (org--repo -> org/repo)
+              const repoSlug = artifactDirName.replace('--', '/');
+              const phase = repoData.phase; // Get phase from the JSON content
 
               if (!repoSlug || !phase) {
-                core.warning(`Missing repo or phase in ${jsonFilePath}`);
+                core.warning(`Missing repo slug (derived from dir name ${artifactDirName}) or phase in ${actualJsonPath}`);
                 continue;
               }
 
               const [owner, repo] = repoSlug.split('/');
               if (!owner || !repo) {
-                core.warning(`Invalid repo slug format in ${jsonFilePath}: ${repoSlug}`);
+                core.warning(`Invalid repo slug format derived from dir name ${artifactDirName}: ${repoSlug}`);
                 continue;
               }
 
@@ -435,7 +445,7 @@ jobs:
 
                 if (existing) {
                   core.info(`Found existing issue #${existing.number} for ${owner}/${repo}. Updating...`);
-                  await github.rest.issues.update({
+                  await github.rest.issues.update({ // Use the correct octokit instance
                     owner,
                     repo,
                     issue_number: existing.number,
@@ -446,7 +456,7 @@ jobs:
                   core.info(`Updated issue #${existing.number}`);
                 } else {
                   core.info(`No existing governance issue found for ${owner}/${repo}. Creating new issue...`);
-                  await github.rest.issues.create({
+                  await github.rest.issues.create({ // Use the correct octokit instance
                     owner,
                     repo,
                     title,
