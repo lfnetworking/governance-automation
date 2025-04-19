@@ -166,7 +166,7 @@ jobs:
       - name: Install Action Dependencies
         if: steps.check_repo.outputs.exists == 'true'
         run: npm ci
-        working-directory: ./classify-config # <<< FIX 2a: Install deps inside the action dir
+        working-directory: ${{ github.workspace }}/classify-config # <<< CHANGED: Use absolute path
 
       # Run the local action - only if checkout succeeded
       - name: Run classification action
