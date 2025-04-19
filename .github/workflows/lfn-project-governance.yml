@@ -402,7 +402,7 @@ jobs:
           github-token: ${{ env.GITHUB_TOKEN }} # Use env var consistent with other steps
           script: |
             const fs = require('fs');
-            const core = require('@actions/core');
+            // const core = require('@actions/core'); // <--- REMOVED THIS LINE
             const github = require('@actions/github');
             const context = github.context;
 
@@ -411,7 +411,7 @@ jobs:
             if (fs.existsSync('summary.md')) {
               body = fs.readFileSync('summary.md', 'utf8');
             } else {
-              core.warning("summary.md not found for issue creation/update.");
+              core.warning("summary.md not found for issue creation/update."); // 'core' is provided by github-script
               body = "Error: Workflow failed to generate summary report.";
             }
 
@@ -421,7 +421,7 @@ jobs:
             const token = process.env.GITHUB_TOKEN;
 
             if (!token) {
-              core.setFailed('GITHUB_TOKEN not found in environment.');
+              core.setFailed('GITHUB_TOKEN not found in environment.'); // 'core' is provided by github-script
               return;
             }
 
@@ -435,16 +435,16 @@ jobs:
               const existing = issues.find(i => i.title === title);
 
               if (existing) {
-                core.info(`Found existing issue #${existing.number}. Updating...`);
+                core.info(`Found existing issue #${existing.number}. Updating...`); // 'core' is provided by github-script
                 await octokit.rest.issues.update({
                   owner,
                   repo,
                   issue_number: existing.number,
                   body
                 });
-                core.info(`Updated issue #${existing.number}`);
+                core.info(`Updated issue #${existing.number}`); // 'core' is provided by github-script
               } else {
-                core.info("No existing governance issue found. Creating new issue...");
+                core.info("No existing governance issue found. Creating new issue..."); // 'core' is provided by github-script
                 await octokit.rest.issues.create({
                   owner,
                   repo,
@@ -452,10 +452,10 @@ jobs:
                   body,
                   labels: ['lfn-governance']
                 });
-                core.info('Created new governance issue');
+                core.info('Created new governance issue'); // 'core' is provided by github-script
               }
             } catch (error) {
-              core.setFailed(`Failed to create or update governance issue: ${error.message}`);
+              core.setFailed(`Failed to create or update governance issue: ${error.message}`); // 'core' is provided by github-script
               console.error("Error details:", error);
             }
 
