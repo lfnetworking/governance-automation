@@ -205,10 +205,27 @@ jobs:
           echo "-----------------------------------------------------"
 
       # Step 7: Install dependencies
-      - name: Install Action Dependencies # Indented 2 spaces
+      - name: Install Action Dependencies
         if: steps.check_repo.outputs.exists == 'true'
-        run: npm install
+        run: npm install # Keep using install for now
         working-directory: ${{ github.workspace }}/classify-config
+
+      # --- ADD THIS DEBUG STEP ---
+      - name: DEBUG - Check node_modules after install
+        if: steps.check_repo.outputs.exists == 'true' # Run only if install was attempted
+        run: |
+          echo "Listing contents of classify-config AFTER npm install:"
+          ls -la ${{ github.workspace }}/classify-config
+          echo "Checking for node_modules/js-yaml:"
+          if [ -d "${{ github.workspace }}/classify-config/node_modules/js-yaml" ]; then
+            echo "OK: node_modules/js-yaml directory found."
+          else
+            echo "ERROR: node_modules/js-yaml directory NOT FOUND!"
+            echo "Listing node_modules contents (if it exists):"
+            ls -la ${{ github.workspace }}/classify-config/node_modules || echo "node_modules directory itself not found!"
+          fi
+          echo "------------------------------------"
+      # --- END OF NEW DEBUG STEP ---
 
       # Step 8: Run local action
       - name: Run classification action # Indented 2 spaces
