@@ -402,9 +402,9 @@ jobs:
           github-token: ${{ env.GITHUB_TOKEN }} # Use env var consistent with other steps
           script: |
             const fs = require('fs');
-            // const core = require('@actions/core'); // <--- Already removed
-            // const github = require('@actions/github'); // <--- REMOVED THIS LINE
-            const context = github.context; // 'github' is provided by github-script
+            // const core = require('@actions/core'); // Already removed
+            // const github = require('@actions/github'); // Already removed
+            // const context = github.context; // <--- REMOVED THIS LINE
 
             let body = "Failed to read summary.md";
             // Check if file exists before reading
@@ -415,8 +415,8 @@ jobs:
               body = "Error: Workflow failed to generate summary report.";
             }
 
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
+            const owner = context.repo.owner; // 'context' is provided by github-script
+            const repo = context.repo.repo;   // 'context' is provided by github-script
             const title = 'Automated LFN Project Lifecycle Summary';
             const token = process.env.GITHUB_TOKEN;
 
