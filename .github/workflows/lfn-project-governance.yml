@@ -132,50 +132,33 @@ jobs:
       # Checkout this repo (governance-automation) to the workspace root
       - name: Checkout governance-automation
         uses: actions/checkout@v4
-       
+
       # Checkout the target project repo (being scanned) into a 'repo' subdirectory
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
-          path: repo # This checkout is fine as it's for the target repo's code
+          path: repo
 
       # Run the local action relative to the workspace root
       - name: Run classification action
-        uses: ./classify-config # Corrected path: relative to workspace root
+        uses: ./classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config_path: .github/workflows/classify-config.yml # Corrected path: relative to workspace root
+          config_path: .github/workflows/classify-config.yml
 
+      # --- Ensure this step exists only ONCE in the 'classify' job ---
       # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
       - name: Sanitize artifact name
-        id: sanitize
-        run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT # Minor fix for echo syntax
+        id: sanitize # <-- Ensure this ID is not duplicated
+        run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT
+      # --- ---
 
       # Upload the classification output (repo.json) for aggregation in report
       - name: Upload classification result
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ steps.sanitize.outputs.safe_name }}.json"
-          path: repo.json
-
-      # Run the local action relative to governance-automation folder
-      - name: Run classification action
-        uses: ./governance-automation/classify-config
-        with:
-          repo: ${{ matrix.repo_slug }}
-          config_path: governance-automation/.github/workflows/classify-config.yml
-
-      # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
-      - name: Sanitize artifact name
-        id: sanitize
-        run: echo "safe_name=${{ matrix.repo_slug }}" | sed 's|/|--|g' >> $GITHUB_OUTPUT
-
-      # Upload the classification output (repo.json) for aggregation in report
-      - name: Upload classification result
-        uses: actions/upload-artifact@v4
-        with:
-          name: "${{ steps.sanitize.outputs.safe_name }}.json"
+          name: "${{ steps.sanitize.outputs.safe_name }}.json" # This uses the output of the single 'sanitize' step
           path: repo.json
 
   # ─────────────────────────────────────────────────────────────────────────────
