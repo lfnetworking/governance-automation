@@ -224,6 +224,18 @@ jobs:
         id: sanitize
         run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT
 
+      # Step 10: DEBUG - Check repo.json before upload (NEW STEP)
+      - name: DEBUG - Check repo.json before upload
+        if: always() # Run even if previous steps failed
+        run: |
+          echo "Checking final state before upload for ${{ matrix.repo_slug }}:"
+          echo "pwd: $(pwd)"
+          echo "ls -la . :"
+          ls -la .
+          echo "--- Content of repo.json: ---"
+          cat repo.json || echo "repo.json NOT FOUND right before upload!"
+          echo "-----------------------------"
+
       # Step 11: Upload result
       - name: Upload classification result # Indented 2 spaces
         uses: actions/upload-artifact@v4
