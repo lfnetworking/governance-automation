@@ -54,7 +54,7 @@ on:
     inputs:
       # Input to select the operational mode when manually triggered
       mode:
-        description: "Choose the run mode: 'test' (runs on subset?), 'review' (standard run), 'induction' (runs on specific repo)"
+        description: "Choose the run mode: 'test' (runs on subset?), 'review' (standard run), 'induction' (runs on specific repo/org)"
         required: true
         default: "review" # Default to standard review mode
         type: choice
@@ -63,10 +63,10 @@ on:
       project_org:
         description: "(induction) GitHub org where the new project lives"
         required: false # Only required if mode is 'induction'
-      # Input for the repository slug, used only in 'induction' mode
+      # Input for the repository slug, used only in 'induction' mode (if specifying single repo)
       project_repo:
-        description: "(induction) Repository slug <org>/<repo>"
-        required: false # Only required if mode is 'induction'
+        description: "(induction) Specific repository slug <org>/<repo> (optional, processes only this repo in the org)"
+        required: false # Optional for induction mode
 
   # Schedule the workflow to run automatically
   schedule:
@@ -85,277 +85,289 @@ env:
   # Sets the GitHub token for all jobs. Using a specific LFN Admin Token for potentially elevated permissions if required across orgs.
   # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings.
   GITHUB_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
+  # BATCH_SIZE is no longer needed with the per-org strategy
+  # BATCH_SIZE: 100
 
 jobs:
   # =============================================================================
-  # JOB 1: Enumerate Projects
-  # PURPOSE: Determines which repositories need to be classified.
+  # JOB 1: Enumerate Organizations
+  # PURPOSE: Determines which organizations (projects) need to be processed.
   #          Reads the list of LFN organizations from '.lfn/projects.yaml'.
-  #          Uses the GitHub CLI ('gh') to list all repositories within those orgs.
-  #          Alternatively, if run in 'induction' mode, uses the manually provided repo slug.
-  # OUTPUT:  A JSON matrix ('matrix') containing the list of repository slugs (<org>/<repo>)
-  #          for the 'classify' job to process in parallel.
+  #          Alternatively, if run in 'induction' mode, uses the manually provided org.
+  # OUTPUT:  A JSON matrix ('matrix') where each element contains an organization name.
   # =============================================================================
-  enumerate-projects:
+  enumerate-projects: # Renaming to enumerate-orgs might be clearer, but keeping for consistency for now
     runs-on: ubuntu-latest # Use the latest available Ubuntu runner
     outputs:
-      # Define the output 'matrix' which will contain the JSON array of repo slugs
+      # Define the output 'matrix' which will contain the JSON object for the strategy
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       # Step 1.1: Checkout the repository containing this workflow
-      # This is necessary to access the '.lfn/projects.yaml' configuration file.
       - name: Checkout Repository Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 1 # Fetch only the latest commit for efficiency
 
       # Step 1.2: Install necessary command-line tools
-      # 'yq' is used to parse the YAML configuration file (.lfn/projects.yaml).
-      # 'jq' is used to process JSON output, particularly for creating the matrix.
       - name: Install yq and jq
         run: sudo apt-get update -y && sudo apt-get install -y yq jq
 
-      # Step 1.3: Build the repository matrix
-      # This script determines the list of repositories based on the run mode.
-      - name: Build repo matrix
+      # Step 1.3: Build the organization matrix
+      # This script determines the list of organizations to process.
+      - name: Build org matrix
         id: set-matrix # Give this step an ID so its output can be referenced
         shell: bash    # Use bash shell for the script
         env:
           # Pass workflow inputs to the script environment
           MODE: ${{ github.event.inputs.mode || 'review' }} # Default to 'review' if not manually triggered
           PROJECT_ORG: ${{ github.event.inputs.project_org }}
-          PROJECT_REPO: ${{ github.event.inputs.project_repo }}
+          # PROJECT_REPO is now handled within the classify job if provided for induction
         run: |
-          # Exit immediately if a command exits with a non-zero status.
-          # Treat unset variables as an error.
-          # Pipeline return status is the value of the last command to exit with non-zero status.
           set -euo pipefail
 
-          # Check if GitHub CLI is installed
-          if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
+          declare -a org_list
 
-          # --- Induction Mode ---
-          # If manually triggered in 'induction' mode, use the provided repo slug.
+          # --- Determine Org List ---
           if [[ "$MODE" == "induction" ]]; then
-            # Check if the required input is provided
-            if [[ -z "$PROJECT_REPO" ]]; then echo "ERROR: Project repo slug must be provided for induction mode." >&2; exit 1; fi
-            # Validate the slug format
-            if ! echo "$PROJECT_REPO" | grep -q '/'; then echo "ERROR: Project repo slug must be in <org>/<repo> format." >&2; exit 1; fi
-            # Output the single repo as a JSON array string for the matrix
-            echo "matrix=[\"${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
-            echo "Matrix (Induction): [\"${PROJECT_REPO}\"]" >&2 # Log for debugging
-          # --- Review/Test Mode ---
-          # Otherwise (for 'review' or 'test' mode), read orgs from the config file.
+            if [[ -z "$PROJECT_ORG" ]]; then echo "ERROR: Project org must be provided for induction mode." >&2; exit 1; fi
+            org_list+=("$PROJECT_ORG")
+            echo "Processing single org (Induction): $PROJECT_ORG" >&2
           else
-            # Check if the config file exists
             if [[ ! -f ".lfn/projects.yaml" ]]; then echo "ERROR: .lfn/projects.yaml not found!" >&2; exit 1; fi
-            # Declare an empty bash array to hold repo slugs
-            declare -a matrix
-            # Read each organization from the 'orgs' list in the YAML file
-            for org in $(yq -r '.orgs[] // ""' .lfn/projects.yaml); do
-              # Skip if the org entry is empty
-              if [[ -z "$org" ]]; then continue; fi
-              echo "📦 Processing org: $org" >&2 # Log progress
-
-              # Use GitHub CLI to list repositories in the organization.
-              # Requires GITHUB_TOKEN with appropriate permissions (read access to org repos).
-              # Fetches only the 'name' field in JSON format. Limit is high to get all repos.
-              # Errors are redirected to /dev/null, failure checked via exit code.
-              repo_list_json=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$org" --limit 1000 --json name -q '.' 2>/dev/null)
-
-              # Check if the 'gh repo list' command failed or returned no repos
-              if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
-                  echo "WARNING: Failed to list repos for '$org' or org is empty/inaccessible." >&2
-                  continue # Skip to the next organization
-              fi
-              # Parse the JSON output (list of {name: "repo-name"}) and add each repo slug to the matrix array
-              while IFS= read -r repo_name; do
-                  # Ensure repo_name is not empty before adding
-                  if [[ -n "$repo_name" ]]; then matrix+=("$org/$repo_name"); fi
-              done < <(echo "$repo_list_json" | jq -r '.[].name') # Use process substitution with jq
-            done
-
-            # Check if any repositories were found across all organizations
-            if [ ${#matrix[@]} -eq 0 ]; then
-              echo "ERROR: No repositories found to process after scanning .lfn/projects.yaml." >&2
-              exit 1
-            fi
-
-            # Convert the bash array into a valid JSON array string for the GitHub Actions matrix
-            # 1. Print each element on a new line.
-            # 2. Use jq to quote each line (-R) and then slurp (-s) into a single JSON array (-c for compact).
-            # 3. Read the JSON string into the 'json' variable.
-            # 4. Set the job output 'matrix'.
-            # 5. Log the size and a sample for debugging.
-            printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
-              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix Size: ${#matrix[@]}" >&2; echo "Matrix Content (sample): $(echo $json | cut -c 1-200)..." >&2; }
+            # Read orgs into the bash array using yq and mapfile
+            mapfile -t org_list < <(yq -r '.orgs[] // ""' .lfn/projects.yaml | grep -v '^$' ) # Read orgs, filter empty lines
+            echo "Read ${#org_list[@]} orgs from .lfn/projects.yaml" >&2
           fi
 
+          # --- Create Matrix ---
+          total_orgs=${#org_list[@]}
+          echo "Total organizations to process: $total_orgs" >&2
+          if [ $total_orgs -eq 0 ]; then
+            echo "ERROR: No organizations found to process." >&2
+            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+            exit 0 # Exit successfully but with empty matrix
+          fi
+
+          # Prepare the 'include' array for the matrix: [ {"org": "org1"}, {"org": "org2"}, ... ]
+          matrix_include_json=$(printf '%s\n' "${org_list[@]}" | jq -R '{org: .}' | jq -sc .)
+
+          # Final matrix object structure: { "include": [ { "org": "org1" }, ... ] }
+          final_matrix_json="{\"include\":${matrix_include_json}}"
+
+          echo "matrix=${final_matrix_json}" >> "$GITHUB_OUTPUT"
+          echo "Generated matrix for $total_orgs organizations." >&2
+          echo "Matrix structure: $(echo $final_matrix_json | jq -c . | cut -c 1-200)..." >&2
+
+
   # =============================================================================
-  # JOB 2: Classify Repositories
-  # PURPOSE: Runs the classification logic for each repository identified in the
-  #          'enumerate-projects' job. This job uses a matrix strategy to run
-  #          multiple instances in parallel, one for each repository.
-  # INPUT:   The 'matrix' output from the 'enumerate-projects' job.
-  # PROCESS: - Checks out the main governance-automation repo (to get the local action).
-  #          - Checks out the target repository code (into a 'repo' subdirectory).
-  #          - Handles cases where the target repo checkout fails (e.g., repo not found).
-  #          - Runs the local JavaScript action ('./classify-config') which reads metrics
-  #            and applies rules from '.github/workflows/classify-config.yml'.
-  #          - Uploads the result (a JSON file containing the phase) as an artifact
-  #            named after the repository slug (e.g., 'org--repo.json').
+  # JOB 2: Classify Repositories per Organization
+  # PURPOSE: Runs the classification logic for all repositories within a specific organization.
+  #          This job uses a matrix strategy based on the organizations identified previously.
+  # INPUT:   The 'matrix' output from 'enumerate-projects', containing organization names.
+  # PROCESS: - For each organization job instance:
+  #          - Checks out the main governance-automation repo.
+  #          - Sets up Node.js and installs dependencies for the local action.
+  #          - Lists all repositories within the current organization.
+  #          - Loops through each repository slug.
+  #          - For each repo: Clones it, runs the classification Node.js script directly,
+  #            uploads the result artifact using GitHub CLI.
   # =============================================================================
   classify:
-    needs: enumerate-projects # This job depends on the 'enumerate-projects' job completing successfully
-    # Condition to prevent running if the matrix output is empty or invalid
-    if: ${{ needs.enumerate-projects.outputs.matrix != '[]' && needs.enumerate-projects.outputs.matrix != '' }}
-    runs-on: ubuntu-latest # Use the latest available Ubuntu runner
+    needs: enumerate-projects # Depends on the 'enumerate-projects' job
+    # Condition to prevent running if the matrix 'include' array is empty
+    if: ${{ needs.enumerate-projects.outputs.matrix != '' && fromJson(needs.enumerate-projects.outputs.matrix).include[0] != null }}
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # If one matrix job fails, allow others to continue
-      matrix:
-        # Define the matrix strategy using the JSON output from the previous job
-        repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
+      fail-fast: false # Allow other orgs to process if one fails
+      matrix: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }} # Matrix iterates over org objects: { "org": "..." }
     steps:
 
       # Step 2.1: Checkout the main branch of this (governance-automation) repository.
-      # This is needed to access the local classification action defined in './classify-config'.
-      - name: Checkout governance-automation code
+      - name: Checkout governance-automation code (Org ${{ matrix.org }})
         uses: actions/checkout@v4
         with:
-          ref: main # Explicitly check out the main branch
+          ref: main
 
-      # Step 2.2: Checkout the target repository code.
-      # This checks out the code of the specific repository being processed in this matrix instance.
-      # The code is placed into a subdirectory named 'repo'.
-      # 'continue-on-error: true' ensures the workflow doesn't stop if a repo is inaccessible/deleted.
-      - name: Checkout target repo (${{ matrix.repo_slug }})
-        id: checkout_target # Give this step an ID to check its outcome/conclusion later
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ matrix.repo_slug }} # The org/repo slug from the matrix
-          path: repo # Checkout into a 'repo' subdirectory
-          fetch-depth: 1 # Fetch only the latest commit
-        continue-on-error: true # Allow the job to continue even if checkout fails
-
-      # Step 2.3: Create a default result file (repo.json).
-      # This file will be uploaded as an artifact. It's created early to ensure an artifact
-      # always exists, even if subsequent steps fail.
-      # If the target repo checkout failed, the phase is set to 'Checkout Failed'.
-      - name: Create default/error result file (${{ matrix.repo_slug }})
-        run: |
-          phase_value="Unknown" # Default phase if classification doesn't run
-          # Check the 'conclusion' of the checkout step. Other outcomes are 'success', 'failure', 'skipped'.
-          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then
-            phase_value="Checkout Failed" # Set specific phase if checkout failed
-            echo "::warning::Target repository checkout failed (conclusion: ${{ steps.checkout_target.conclusion }}). Setting phase to Checkout Failed."
-          fi
-          # Create the JSON file with the determined phase.
-          printf '{"phase": "%s"}\n' "$phase_value" > repo.json
-          echo "Created initial repo.json with phase: ${phase_value}"
-
-      # Step 2.4: Setup Node.js environment.
-      # Required only if the target repo checkout was successful, as Node.js is needed for the classification action.
-      - name: Setup Node.js (${{ matrix.repo_slug }})
-        if: steps.checkout_target.conclusion == 'success' # Only run if checkout succeeded
+      # Step 2.2: Setup Node.js environment (once per org job).
+      - name: Setup Node.js (Org ${{ matrix.org }})
         uses: actions/setup-node@v4
         with:
-          node-version: '16' # Use Node.js version 16, matching the action's definition
+          node-version: '16'
 
-      # Step 2.5: Install dependencies for the local classification action.
-      # Runs 'npm install' within the action's directory.
-      - name: Install Action Dependencies (${{ matrix.repo_slug }})
-        if: steps.checkout_target.conclusion == 'success' # Only run if checkout succeeded
+      # Step 2.3: Install dependencies for the local classification action (once per org job).
+      - name: Install Action Dependencies (Org ${{ matrix.org }})
         run: npm install
-        working-directory: ${{ github.workspace }}/classify-config # Specify the directory of the local action
+        working-directory: ${{ github.workspace }}/classify-config
 
-      # Step 2.6: Run the local classification action.
-      # This executes the 'index.js' script defined in './classify-config/action.yml'.
-      # The action performs the actual classification logic and overwrites 'repo.json' with the result.
-      - name: Run classification action (${{ matrix.repo_slug }})
-        id: classification # Give step an ID (though its output isn't directly used later here)
-        if: steps.checkout_target.conclusion == 'success' # Only run if checkout succeeded
-        uses: ./classify-config # Reference the local action directory
-        with:
-          # Pass inputs required by the local action
-          repo: ${{ matrix.repo_slug }}
-          config_path: .github/workflows/classify-config.yml # Path to the classification rules
+      # Step 2.4: Process all repositories within the current organization.
+      - name: Process Repositories for Org ${{ matrix.org }}
+        shell: bash
+        env:
+          # Pass specific repo slug if provided in induction mode, otherwise process all
+          INDUCTION_REPO_SLUG: ${{ github.event.inputs.project_repo }}
+          MODE: ${{ github.event.inputs.mode || 'review' }}
+        run: |
+          set -e # Exit on first error during repo processing for this org
 
-      # Step 2.7: Sanitize the repository slug for use as an artifact name.
-      # Replaces '/' with '--' to create a valid filename (e.g., 'org/repo' becomes 'org--repo').
-      - name: Sanitize artifact name (${{ matrix.repo_slug }})
-        id: sanitize
-        run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT
+          current_org="${{ matrix.org }}"
+          config_path=".github/workflows/classify-config.yml" # Relative path within checked out code
 
-      # Step 2.8: Upload the classification result as an artifact.
-      # The artifact contains the 'repo.json' file (which now holds the final phase).
-      # The artifact name is based on the sanitized repository slug.
-      - name: Upload classification result (${{ matrix.repo_slug }})
-        uses: actions/upload-artifact@v4
-        with:
-          name: "${{ steps.sanitize.outputs.safe_name }}.json" # e.g., org--repo.json
-          path: repo.json # Path to the file to upload
+          # Check if gh is installed (needed for repo list and artifact upload)
+          if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
+          # Authenticate gh CLI using the job's GITHUB_TOKEN
+          echo "${{ env.GITHUB_TOKEN }}" | gh auth login --with-token
+
+          # --- List Repositories for the Current Org ---
+          declare -a org_repos
+          echo "Listing repositories for organization: $current_org..." >&2
+
+          # If in induction mode AND a specific repo was given, only process that one
+          if [[ "$MODE" == "induction" ]] && [[ -n "$INDUCTION_REPO_SLUG" ]] && [[ "$INDUCTION_REPO_SLUG" == "$current_org/"* ]]; then
+             echo "Induction mode with specific repo: $INDUCTION_REPO_SLUG" >&2
+             org_repos+=("$INDUCTION_REPO_SLUG")
+          else
+             # Otherwise, list all public repos in the org
+             repo_list_json=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>/dev/null)
+             if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
+                 echo "::warning::Failed to list repos for '$current_org' or org is empty/inaccessible. Skipping org."
+                 exit 0 # Exit successfully, nothing to process for this org
+             fi
+             # Populate the array with <org>/<repo> slugs
+             while IFS= read -r repo_name; do
+                 if [[ -n "$repo_name" ]]; then org_repos+=("$current_org/$repo_name"); fi
+             done < <(echo "$repo_list_json" | jq -r '.[].name')
+          fi
+
+          echo "Found ${#org_repos[@]} repositories to process for $current_org." >&2
+          if [ ${#org_repos[@]} -eq 0 ]; then
+             echo "No repositories to process for $current_org." >&2
+             exit 0 # Exit successfully
+          fi
+
+          # --- Loop Through Repositories in this Org ---
+          for repo_slug in "${org_repos[@]}"; do
+            if [[ -z "$repo_slug" ]]; then continue; fi # Should not happen, but safety check
+
+            echo "--- Processing repository: $repo_slug ---" >&2
+            target_repo_path="./repo_temp" # Temporary checkout path
+            result_json_path="./repo_result.json" # Temporary result file path
+            safe_name=$(echo "$repo_slug" | sed 's|/|--|g') # Sanitize name for artifact
+            artifact_name="${safe_name}.json"
+
+            # Clean up from previous iteration
+            rm -f "$result_json_path"
+            rm -rf "$target_repo_path"
+
+            # --- Checkout target repo ---
+            echo "Cloning $repo_slug..." >&2
+            git_output=$(git clone --depth 1 "https://github-actions:${{ env.GITHUB_TOKEN }}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1)
+            git_exit_code=$?
+
+            phase_value="Unknown"
+            checkout_successful=false
+            if [[ $git_exit_code -eq 0 ]]; then
+              echo "Clone successful." >&2
+              checkout_successful=true
+            else
+              echo "::warning::Failed to clone $repo_slug. Exit code: $git_exit_code. Output: $git_output"
+              phase_value="Checkout Failed"
+            fi
+
+            # --- Run Classification Script ---
+            if [[ "$checkout_successful" == true ]]; then
+              echo "Running classification script for $repo_slug..." >&2
+              # Execute the Node.js script directly
+              INPUT_REPO="$repo_slug" \
+              INPUT_CONFIG_PATH="$config_path" \
+              GITHUB_TOKEN="${{ env.GITHUB_TOKEN }}" \
+              node "${{ github.workspace }}/classify-config/index.js"
+
+              # Check if script produced output and move it
+              if [[ -f "${{ github.workspace }}/repo.json" ]]; then
+                 mv "${{ github.workspace }}/repo.json" "$result_json_path"
+                 echo "Classification script ran, result moved to $result_json_path" >&2
+                 phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Unknown")
+              else
+                 echo "::error::Classification script did not produce repo.json for $repo_slug"
+                 phase_value="Classification Error"
+                 printf '{"phase": "%s", "error": "Classification script failed"}\n' "$phase_value" > "$result_json_path"
+              fi
+            else
+              # Create result JSON directly if checkout failed
+              printf '{"phase": "%s", "error": "Checkout failed"}\n' "$phase_value" > "$result_json_path"
+            fi
+
+            echo "Final phase for $repo_slug: $phase_value" >&2
+
+            # --- Upload Artifact ---
+            echo "Uploading artifact $artifact_name..." >&2
+            gh artifact upload "$result_json_path" --name "$artifact_name"
+            if [[ $? -ne 0 ]]; then
+              echo "::error::Failed to upload artifact $artifact_name for $repo_slug"
+              # Consider if this should be a fatal error for the org job
+            else
+              echo "Artifact $artifact_name uploaded successfully." >&2
+            fi
+
+            # Clean up for next repo
+            rm -f "$result_json_path"
+            rm -rf "$target_repo_path"
+            echo "--- Finished processing repository: $repo_slug ---" >&2
+
+          done # End of loop through repos for the org
+
+          echo "Finished processing Org ${current_org}." >&2
+
 
   # =============================================================================
   # JOB 3: Publish Report
-  # PURPOSE: Aggregates the classification results from all repositories,
-  #          generates a Markdown summary report, and posts/updates that report
-  #          as a GitHub issue in the main governance-automation repository.
-  # INPUT:   Artifacts uploaded by the 'classify' job instances.
+  # PURPOSE: Aggregates the classification results from all repositories (across
+  #          all orgs), generates a Markdown summary report, and posts/updates
+  #          that report as a GitHub issue in the main governance-automation repository.
+  # INPUT:   Artifacts uploaded by the 'classify' job instances (one per repo).
   # PROCESS: - Downloads all artifacts.
-  #          - Parses each downloaded JSON file ('repo.json') to get the repo and phase.
-  #          - Builds an associative array grouping results by project (organization).
-  #          - Generates a Markdown file ('summary.md') with tables for each project.
-  #          - Uses github-script to find an existing summary issue or create a new one,
-  #            updating the issue body with the latest summary.md content.
-  #          - Optionally notifies a Slack channel.
+  #          - Parses each downloaded JSON file to get the repo and phase.
+  #          - Builds the Markdown report ('summary.md') as before.
+  #          - Uses github-script to find/create/update the summary issue.
+  #          - Optionally notifies Slack.
+  # NOTE:    No changes are needed in this job compared to the previous version.
+  #          It correctly aggregates artifacts regardless of how they were generated.
   # =============================================================================
   publish-report:
-    needs: classify # Depends on the completion of all 'classify' matrix jobs
-    runs-on: ubuntu-latest # Use the latest available Ubuntu runner
-    # 'if: always()' ensures this job runs even if some 'classify' jobs failed,
-    # allowing a partial report to be generated.
-    if: always()
+    needs: classify # Depends on the completion of all 'classify' org jobs
+    runs-on: ubuntu-latest
+    if: always() # Run even if some classify jobs failed
     steps:
-      # Step 3.1: Download all artifacts produced by the 'classify' job.
-      # Artifacts are downloaded into the 'artifacts' directory.
-      # Each artifact will be placed in a subdirectory named after the artifact itself (e.g., artifacts/org--repo.json/).
+      # Step 3.1: Download all artifacts produced by the 'classify' jobs.
       - name: Download classification artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts # Download all available artifacts to this directory
+          path: artifacts # Download all available artifacts
 
       # Step 3.2: Build the Markdown Summary Report.
-      # This script processes the downloaded JSON files and creates 'summary.md'.
       - name: Build Markdown Report
-        id: build-md # Give step an ID
+        id: build-md
         shell: bash
         run: |
-          # Configure shell options for robustness
           set -euo pipefail
-          # Ensure jq is available for parsing JSON
           if ! command -v jq &> /dev/null; then
             echo "jq not found, installing..." >&2
             sudo apt-get update -y && sudo apt-get install -y jq
           fi
 
-          # Declare a bash associative array to store report rows, keyed by project/org name
           declare -A rows_data
           echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
 
-          # Find all downloaded JSON files (expected path: artifacts/<artifact-name>/<some-name>.json)
-          # Use process substitution to avoid subshell issues with the 'rows_data' array
+          # Find all downloaded JSON files (*.json) inside the artifact directories (e.g., artifacts/org--repo.json/*.json)
           while IFS= read -r -d $'\0' file; do
-            # Get the directory name (which corresponds to the artifact name, e.g., org--repo.json)
-            dir=$(dirname "$file")
-            artifact_name_with_ext=$(basename "$dir")
-            artifact_name=${artifact_name_with_ext%.json} # Remove .json extension
+            dir=$(dirname "$file") # Directory is artifacts/org--repo.json
+            artifact_name_with_ext=$(basename "$dir") # org--repo.json
+            artifact_name=${artifact_name_with_ext%.json} # org--repo
 
-            # Reconstruct the original org/repo slug from the artifact name
             full=${artifact_name//--/\/}
-            project=${full%%/*} # Extract the part before the first '/' (org)
-            repo=${full#*/}    # Extract the part after the first '/' (repo)
+            project=${full%%/*}
+            repo=${full#*/}
 
-            # Read the phase from the JSON file, default to "Unknown" if missing or parsing fails
             if [[ -f "$file" ]]; then
               phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
               if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
@@ -363,163 +375,110 @@ jobs:
                 echo "Warning: Could not parse phase or phase was null in $file ($artifact_name). Setting to Unknown." >&2
               fi
             else
-              phase="Unknown (Missing JSON)" # Should not happen if classify job worked
-              echo "Warning: *.json file not found in $dir ($artifact_name)" >&2
+              phase="Unknown (Missing JSON)"
+              echo "Warning: JSON file not found in $dir ($artifact_name)" >&2
             fi
 
-            # Format the Markdown table row with a link to the repository
             row_line="| [$repo](https://github.com/$project/$repo) | $phase |"
-            # Append the row to the corresponding project key in the associative array
-            if [[ -z "${rows_data[$project]:-}" ]]; then # Check if key exists
-              rows_data[$project]="$row_line" # Initialize if first entry for this project
+            if [[ -z "${rows_data[$project]:-}" ]]; then
+              rows_data[$project]="$row_line"
             else
-              rows_data[$project]+=$'\n'"$row_line" # Append with newline if key exists
+              rows_data[$project]+=$'\n'"$row_line"
             fi
-          done < <(find artifacts -mindepth 2 -maxdepth 2 -name '*.json' -print0) # Find *.json files 2 levels deep
+          # Find *.json files exactly two levels deep (artifacts/<artifact_name>/result.json)
+          done < <(find artifacts -mindepth 2 -maxdepth 2 -name '*.json' -print0)
 
-          # Check if any data was successfully processed
+
           if [ ${#rows_data[@]} -eq 0 ]; then
-            # If no data, create a minimal summary indicating failure
             echo "WARNING: No valid artifact data found to generate report." >&2
             echo "# LFN Project Lifecycle Summary" > summary.md
             echo "" >> summary.md
             echo "*No project data processed successfully. Check the 'classify' job logs for errors.*" >> summary.md
           else
-            # If data exists, generate the full Markdown report
             {
-              # Report Header
               echo "# LFN Project Lifecycle Summary"
               echo ""
-              echo "Generated on: $(date -u)" # Add timestamp
-              # Add link to the specific workflow run
+              echo "Generated on: $(date -u)"
               echo "Workflow Run: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>"
               echo ""
-
-              # Get project names (keys of the array) and sort them alphabetically
               sorted_projects=()
               while IFS= read -r key; do
                   sorted_projects+=("$key")
               done < <(printf '%s\n' "${!rows_data[@]}" | sort)
 
-              # Iterate through each project (organization)
               for project in "${sorted_projects[@]}"; do
-                echo # Add spacing
-                echo "## $project" # Project header
-                echo "| Repository | Phase |" # Table header
-                echo "|------------|-------|" # Table separator
-                # Get the rows for the current project, sort them by Phase (column 3), then Repo name (column 2)
+                echo
+                echo "## $project"
+                echo "| Repository | Phase |"
+                echo "|------------|-------|"
                 mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k3,3 -k2,2)
-                # Print the sorted table rows
                 printf '%s\n' "${sorted_lines[@]}"
               done
-            } > summary.md # Redirect the generated text to summary.md
+            } > summary.md
           fi
 
-          # Log the generated summary to the workflow console for debugging
           echo "Generated summary.md:" >&2
           cat summary.md >&2
 
-          # Set the generated Markdown content as a step output named 'summary'
-          # Use heredoc format for multi-line output
           {
             echo 'summary<<EOF'
             cat summary.md
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-          # Append the generated Markdown to the GitHub Actions job summary page
-          # This makes the report easily viewable in the Actions UI run summary.
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # Step 3.3: Create or Update the Governance Summary Issue
-      # Uses the 'github-script' action to interact with the GitHub API.
-      # Finds an existing issue with a specific title/label or creates a new one.
-      # Updates the issue body with the content of 'summary.md'.
       - name: Create or update governance issue
         uses: actions/github-script@v7
         with:
-          # Pass the token needed for API calls
           github-token: ${{ env.GITHUB_TOKEN }}
           script: |
-            // Required modules (fs is standard Node.js)
             const fs = require('fs');
             // Note: 'core', 'github', and 'context' are automatically provided by actions/github-script@v7
-            // Do NOT redeclare them using require()!
-
-            let body = "Failed to read summary.md"; // Default body if file reading fails
-            // Check if the summary file exists before attempting to read
+            let body = "Failed to read summary.md";
             if (fs.existsSync('summary.md')) {
-              body = fs.readFileSync('summary.md', 'utf8'); // Read the generated report
+              body = fs.readFileSync('summary.md', 'utf8');
             } else {
               core.warning("summary.md not found for issue creation/update.");
               body = "Error: Workflow failed to generate summary report.";
             }
-
-            // Get owner and repository name from the context where the workflow is running
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            // Define the standard title for the governance issue
             const title = 'Automated LFN Project Lifecycle Summary';
-            // Get the token from the environment (set globally for the job)
             const token = process.env.GITHUB_TOKEN;
-
-            // Check if the token is available (should be, due to global env)
             if (!token) {
               core.setFailed('GITHUB_TOKEN not found in environment.');
-              return; // Exit script if token is missing
+              return;
             }
-
             // Use the pre-authenticated 'github' object provided by the action
-            // This object is an initialized Octokit client instance.
             try {
-              // Find existing open issues with the specific label 'lfn-governance'
-              // Paginate handles potential multi-page results automatically.
               const issues = await github.paginate(github.rest.issues.listForRepo, {
                 owner, repo, labels: 'lfn-governance', state: 'open'
               });
-              // Find the specific issue by title among the filtered issues
               const existing = issues.find(i => i.title === title);
-
               if (existing) {
-                // If issue exists, update its body
                 core.info(`Found existing issue #${existing.number}. Updating...`);
-                await github.rest.issues.update({
-                  owner,
-                  repo,
-                  issue_number: existing.number,
-                  body // Update the body with the latest summary.md content
-                });
+                await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
                 core.info(`Updated issue #${existing.number}`);
               } else {
-                // If issue doesn't exist, create a new one
                 core.info("No existing governance issue found. Creating new issue...");
-                await github.rest.issues.create({
-                  owner,
-                  repo,
-                  title,
-                  body,
-                  labels: ['lfn-governance'] // Apply the standard label
-                });
+                await github.rest.issues.create({ owner, repo, title, body, labels: ['lfn-governance'] });
                 core.info('Created new governance issue');
               }
             } catch (error) {
-              // Handle errors during API calls (e.g., permissions, rate limits)
               core.setFailed(`Failed to create or update governance issue: ${error.message}`);
-              console.error("Error details:", error); // Log detailed error for debugging
+              console.error("Error details:", error);
             }
 
       # Step 3.4: Optional Slack Notification
-      # Sends a message to a Slack channel if a webhook URL is configured as a secret.
       - name: Notify Slack (optional)
-        # Only run if the SLACK_WEBHOOK_URL secret is set and not empty
         if: ${{ env.SLACK_WEBHOOK_URL != '' }}
         uses: slackapi/slack-github-action@v1.24.0
         with:
-          # Define the Slack message payload (using Block Kit format)
           payload: |
             {
               "text": ":clipboard: LFN governance summary updated for *${{ github.repository }}* – <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
             }
         env:
-          # Pass the webhook URL from secrets to the action's environment
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
