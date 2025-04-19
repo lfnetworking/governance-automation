@@ -122,8 +122,14 @@ jobs:
   # 🧪 Classify: Classifies each repo based on metrics and classify-config.yml
   # ─────────────────────────────────────────────────────────────────────────────
   classify:
-    # ... needs, runs-on, strategy ...
-    steps:
+    needs: enumerate-projects  # Specifies dependency on the previous job
+    runs-on: ubuntu-latest     # Specifies the runner type
+    strategy:                  # Defines the matrix strategy
+      fail-fast: false         # Allows other matrix jobs to continue if one fails
+      matrix:                  # Defines the matrix itself
+        repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }} # Uses output from previous job
+    steps:                     # Steps begin here with correct indentation
+      # ... The rest of your steps for the classify job follow ...
       # Checkout this repo (governance-automation) to the workspace root
       - name: Checkout governance-automation
         uses: actions/checkout@v4
