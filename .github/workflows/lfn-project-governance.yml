@@ -129,25 +129,25 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checkout this repo that contains the local action
+      # Checkout this repo into a subfolder so local actions are available
       - name: Checkout governance-automation
         uses: actions/checkout@v4
         with:
           path: governance-automation
 
-      # Checkout the target repo you want to analyze
+      # Checkout the target project repo (being scanned)
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: repo
 
-      # Run the classify-config local action relative to checked-out root
+      # Run the local action relative to governance-automation folder
       - name: Run classification action
         uses: ./governance-automation/classify-config
         with:
           repo: ${{ matrix.repo_slug }}
-          config_path: ./governance-automation/.github/workflows/classify-config.yml
+          config_path: governance-automation/.github/workflows/classify-config.yml
 
       # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
       - name: Sanitize artifact name
