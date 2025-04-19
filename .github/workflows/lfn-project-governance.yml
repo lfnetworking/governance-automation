@@ -148,7 +148,6 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   classify:
     needs: enumerate-projects
-    # Prevent running if the matrix is empty (e.g., enumerate failed)
     if: ${{ needs.enumerate-projects.outputs.matrix != '[]' && needs.enumerate-projects.outputs.matrix != '' }}
     runs-on: ubuntu-latest
     strategy:
@@ -198,7 +197,7 @@ jobs:
       - name: Create default/error result file (${{ matrix.repo_slug }})
         run: |
           phase_value="Unknown"
-          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then
+          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then # Checks conclusion
             phase_value="Checkout Failed"
             echo "::warning::Target repository checkout failed (conclusion: ${{ steps.checkout_target.conclusion }}). Setting phase to Checkout Failed."
           fi
@@ -299,8 +298,8 @@ jobs:
       - name: Build Markdown Report
         id: build-md
         shell: bash
+        # === CORRECTED SCRIPT FOR REPORT GENERATION ===
         run: |
-          # Corrected run script for 'Build Markdown Report' step v3
           set -euo pipefail
           # Check if jq is installed, install if necessary
           if ! command -v jq &> /dev/null; then
@@ -359,9 +358,9 @@ jobs:
                 echo "## $project"
                 echo "| Repository | Phase |"
                 echo "|------------|-------|"
-                # Print the stored lines for this project, sorting them by repo name (second field)
-                # Use process substitution with sort to avoid subshell issues with the array
+                # Sort the lines for the current project and store in an indexed array using mapfile
                 mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2)
+                # Print the sorted lines from the indexed array
                 printf '%s\n' "${sorted_lines[@]}"
               done
             } > summary.md
@@ -380,7 +379,6 @@ jobs:
           # Add to job summary for easy viewing in Actions UI
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-
       # Updates or creates a governance issue on the repo with the report content
       - name: Create or update governance issue
         uses: actions/github-script@v7
@@ -398,7 +396,6 @@ jobs:
               body = fs.readFileSync('summary.md', 'utf8');
             } else {
               core.warning("summary.md not found for issue creation/update.");
-              // Decide if you want to exit or post a default message
               body = "Error: Workflow failed to generate summary report.";
             }
 
@@ -416,7 +413,6 @@ jobs:
 
             try {
               // Find existing issue with the specific title and label
-              // Note: Searching might be more robust if labels alone aren't unique enough
               const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
                 owner, repo, labels: 'lfn-governance', state: 'open'
               });
