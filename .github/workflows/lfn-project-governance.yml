@@ -404,7 +404,7 @@ jobs:
             const fs = require('fs');
             // const core = require('@actions/core'); // Already removed
             // const github = require('@actions/github'); // Already removed
-            // const context = github.context; // <--- REMOVED THIS LINE
+            // const context = github.context; // Already removed
 
             let body = "Failed to read summary.md";
             // Check if file exists before reading
@@ -418,44 +418,49 @@ jobs:
             const owner = context.repo.owner; // 'context' is provided by github-script
             const repo = context.repo.repo;   // 'context' is provided by github-script
             const title = 'Automated LFN Project Lifecycle Summary';
-            const token = process.env.GITHUB_TOKEN;
+            const token = process.env.GITHUB_TOKEN; // Using env var as before
 
             if (!token) {
-              core.setFailed('GITHUB_TOKEN not found in environment.'); // 'core' is provided by github-script
+              // This check might be redundant if the action fails without a token, but good practice
+              core.setFailed('GITHUB_TOKEN not found in environment.');
               return;
             }
 
-            const octokit = github.getOctokit(token); // 'github' is provided by github-script
+            // Use the pre-authenticated 'github' object directly
+            // const octokit = github.getOctokit(token); // <--- REMOVED THIS LINE
 
             try {
               // Find existing issue with the specific title and label
-              const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
+              // Use 'github' which is the pre-authenticated octokit instance
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
                 owner, repo, labels: 'lfn-governance', state: 'open'
               });
               const existing = issues.find(i => i.title === title);
 
               if (existing) {
-                core.info(`Found existing issue #${existing.number}. Updating...`); // 'core' is provided by github-script
-                await octokit.rest.issues.update({
+                core.info(`Found existing issue #${existing.number}. Updating...`);
+                // Use 'github' which is the pre-authenticated octokit instance
+                await github.rest.issues.update({
                   owner,
                   repo,
                   issue_number: existing.number,
                   body
                 });
-                core.info(`Updated issue #${existing.number}`); // 'core' is provided by github-script
+                core.info(`Updated issue #${existing.number}`);
               } else {
-                core.info("No existing governance issue found. Creating new issue..."); // 'core' is provided by github-script
-                await octokit.rest.issues.create({
+                core.info("No existing governance issue found. Creating new issue...");
+                 // Use 'github' which is the pre-authenticated octokit instance
+                await github.rest.issues.create({
                   owner,
                   repo,
                   title,
                   body,
                   labels: ['lfn-governance']
                 });
-                core.info('Created new governance issue'); // 'core' is provided by github-script
+                core.info('Created new governance issue');
               }
             } catch (error) {
-              core.setFailed(`Failed to create or update governance issue: ${error.message}`); // 'core' is provided by github-script
+              core.setFailed(`Failed to create or update governance issue: ${error.message}`);
               console.error("Error details:", error);
             }
 
