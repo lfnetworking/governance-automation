@@ -108,14 +108,40 @@ jobs:
             echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
           else
             declare -a matrix
+            # Ensure .lfn/projects.yaml exists before trying to read it
+            if [[ ! -f ".lfn/projects.yaml" ]]; then
+              echo "ERROR: .lfn/projects.yaml not found!" >&2
+              exit 1
+            fi
+            # Ensure gh is installed and authenticated if needed
+            if ! command -v gh &> /dev/null; then
+               echo "ERROR: gh cli not found. Please ensure it's installed on the runner." >&2
+               # Or add steps to install it
+               exit 1
+            fi
+             # Ensure jq is installed
+            if ! command -v jq &> /dev/null; then
+               echo "ERROR: jq not found. Please ensure it's installed on the runner." >&2
+               # Or add steps to install it
+               exit 1
+            fi
             for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
               echo "📦 $org" >&2
-              # Use GH_TOKEN for gh cli auth if needed, ensure gh is installed
-              for repo in $(gh repo list "$org" --json name -q '.[].name'); do
+              # Add error handling for gh repo list
+              repo_list_json=$(gh repo list "$org" --json name -q '.' 2>/dev/null)
+              if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]]; then
+                 echo "WARNING: Failed to list repos for $org or org is empty." >&2
+                 continue
+              fi
+              for repo in $(echo "$repo_list_json" | jq -r '.[].name'); do
                 matrix+=("$org/$repo")
               done
             done
-            # Ensure jq is installed or handle potential errors
+            # Ensure matrix is not empty before creating JSON
+            if [ ${#matrix[@]} -eq 0 ]; then
+              echo "ERROR: No repositories found to process." >&2
+              exit 1
+            fi
             printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
               read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix: $json" >&2; }
           fi
@@ -130,7 +156,7 @@ jobs:
       fail-fast: false
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
-    steps: # Note: Steps below are indented 2 spaces relative to this line
+    steps:
 
       # Step 1: Checkout governance-automation
       - name: Checkout governance-automation
@@ -138,7 +164,7 @@ jobs:
         with:
           ref: main # Explicitly check out main
 
-      # Step 2: Debug Step 1 (Optional - Can be removed later)
+      # Step 2: Debug Step 1 (Can be removed later)
       - name: Check workspace IMMEDIATELY after main checkout
         run: |
           echo "## Debug: Contents of workspace (${{ github.workspace }}) after checking out governance-automation:"
@@ -153,17 +179,17 @@ jobs:
 
       # Step 3: Checkout target repo
       - name: Checkout target repo
-        id: checkout_target # ID for referencing outcome/conclusion
+        id: checkout_target # ID is present
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: repo
           fetch-depth: 1
-        continue-on-error: true # Correct placement
+        continue-on-error: true # Correctly placed
 
-      # Step 3.1: DEBUG - Check Checkout Outcome and Conclusion (Optional - Can be removed later)
+      # Step 3.1: DEBUG - Check Checkout Outcome and Conclusion (Can be removed later)
       - name: DEBUG - Check Checkout Outcome and Conclusion
-        if: always() # Ensure this runs even if checkout failed
+        if: always()
         run: |
           echo "Outcome of step 'checkout_target': [${{ steps.checkout_target.outcome }}]"
           echo "Conclusion of step 'checkout_target': [${{ steps.checkout_target.conclusion }}]"
@@ -172,9 +198,8 @@ jobs:
       # Step 4: Create default/error result file
       - name: Create default/error result file
         run: |
-          phase_value="Unknown" # Default if checkout succeeded but classification might fail later
-          # Check the CONCLUSION of the checkout step directly
-          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then
+          phase_value="Unknown"
+          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then # Checks conclusion
             phase_value="Checkout Failed"
             echo "::warning::Target repository checkout failed (conclusion: ${{ steps.checkout_target.conclusion }}). Setting phase to Checkout Failed."
           fi
@@ -183,14 +208,14 @@ jobs:
 
       # Step 5: Setup Node.js
       - name: Setup Node.js
-        if: steps.checkout_target.conclusion == 'success' # CORRECTED Condition
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
         uses: actions/setup-node@v4
         with:
           node-version: '16'
 
-      # Step 6: Debug Step 2 (Optional - Can be removed later)
+      # Step 6: Debug Step 2 (Can be removed later)
       - name: Check workspace BEFORE installing dependencies
-        if: steps.checkout_target.conclusion == 'success' # CORRECTED Condition (Added for consistency)
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
         run: |
           echo "## Debug: Contents of workspace (${{ github.workspace }}) just before npm install:"
           ls -la ${{ github.workspace }}
@@ -204,13 +229,13 @@ jobs:
 
       # Step 7: Install dependencies
       - name: Install Action Dependencies
-        if: steps.checkout_target.conclusion == 'success' # CORRECTED Condition
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
         run: npm install # Using install as package-lock might be missing/stale
         working-directory: ${{ github.workspace }}/classify-config
 
-      # Step 7.1: DEBUG - Check node_modules after install (Optional - Can be removed later)
+      # Step 7.1: DEBUG - Check node_modules after install (Can be removed later)
       - name: DEBUG - Check node_modules after install
-        if: steps.checkout_target.conclusion == 'success' # CORRECTED Condition
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
         run: |
           echo "Listing contents of classify-config AFTER npm install:"
           ls -la ${{ github.workspace }}/classify-config
@@ -227,7 +252,7 @@ jobs:
       # Step 8: Run local action
       - name: Run classification action
         id: classification
-        if: steps.checkout_target.conclusion == 'success' # CORRECTED Condition
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
         uses: ./classify-config
         with:
           repo: ${{ matrix.repo_slug }}
@@ -238,7 +263,7 @@ jobs:
         id: sanitize
         run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT
 
-      # Step 10: DEBUG - Check repo.json before upload (Optional - Can be removed later)
+      # Step 10: DEBUG - Check repo.json before upload (Can be removed later)
       - name: DEBUG - Check repo.json before upload
         if: always() # Run even if previous steps failed
         run: |
@@ -274,84 +299,86 @@ jobs:
       - name: Build Markdown Report
         id: build-md
         shell: bash
-        set -euo pipefail
-  # Check if jq is installed, install if necessary
-  if ! command -v jq &> /dev/null; then
-    echo "jq not found, installing..." >&2
-    sudo apt-get update -y && sudo apt-get install -y jq
-  fi
+        run: |
+          # Corrected run script for 'Build Markdown Report' step
+          set -euo pipefail
+          # Check if jq is installed, install if necessary
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found, installing..." >&2
+            sudo apt-get update -y && sudo apt-get install -y jq
+          fi
 
-  declare -A rows_data # Use a different name for clarity
-  echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
-  # Loop through artifact directories created by download-artifact
-  find artifacts -mindepth 2 -maxdepth 2 -name 'repo.json' -print0 | while IFS= read -r -d $'\0' file; do
-    dir=$(dirname "$file")
-    slug=$(basename "$dir")
-    echo "Processing artifact directory: $dir, Slug: $slug" >&2
-    # Restore original slug format
-    full=${slug//--/\/}
-    project=${full%%/*}
-    repo=${full#*/}
+          declare -A rows_data # Use a different name for clarity
+          echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
+          # Loop through artifact directories created by download-artifact
+          # Structure is artifacts/<artifact-name>/repo.json
+          find artifacts -mindepth 2 -maxdepth 2 -name 'repo.json' -print0 | while IFS= read -r -d $'\0' file; do
+            dir=$(dirname "$file")
+            slug=$(basename "$dir")
+            echo "Processing artifact directory: $dir, Slug: $slug" >&2
+            # Restore original slug format
+            full=${slug//--/\/}
+            project=${full%%/*}
+            repo=${full#*/}
 
-    if [[ -f "$file" ]]; then
-      phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
-      # Handle potential jq errors or null values explicitly
-      if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
-        phase="Unknown"
-        echo "Warning: Could not parse phase or phase was null in $file. Setting to Unknown." >&2
-      fi
-    else
-      # This case should ideally not happen if upload succeeded
-      phase="Unknown (Missing JSON)"
-      echo "Warning: repo.json not found in $dir" >&2
-    fi
+            if [[ -f "$file" ]]; then
+              phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
+              # Handle potential jq errors or null values explicitly
+              if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
+                phase="Unknown"
+                echo "Warning: Could not parse phase or phase was null in $file. Setting to Unknown." >&2
+              fi
+            else
+              # This case should ideally not happen if upload succeeded
+              phase="Unknown (Missing JSON)"
+              echo "Warning: repo.json not found in $dir" >&2
+            fi
 
-    # Append raw data line for later sorting, using newline as separator
-    row_line="| $repo | $phase |"
-    if [[ -z "${rows_data[$project]:-}" ]]; then
-      rows_data[$project]="$row_line"
-    else
-      rows_data[$project]+=$'\n'"$row_line"
-    fi
-  done
+            # Append raw data line for later sorting, using newline as separator
+            row_line="| $repo | $phase |"
+            # Append row, handling potential newline issues if rows_data[$project] was previously empty
+            if [[ -z "${rows_data[$project]:-}" ]]; then
+              rows_data[$project]="$row_line"
+            else
+              # Use a unique separator like newline for splitting later
+              rows_data[$project]+=$'\n'"$row_line"
+            fi
+          done
 
-  # Check if any rows were generated
-  if [ ${#rows_data[@]} -eq 0 ]; then
-    echo "WARNING: No valid artifact data found to generate report." >&2
-    echo "# LFN Project Lifecycle Summary" > summary.md
-    echo "" >> summary.md
-    echo "*No project data processed successfully.*" >> summary.md
-  else
-    # Now generate the markdown AFTER collecting all data
-    {
-      echo "# LFN Project Lifecycle Summary"
-      # Sort projects alphabetically
-      for project in $(printf '%s\n' "${!rows_data[@]}" | sort); do
-        echo
-        echo "## $project"
-        echo "| Repository | Phase |"
-        echo "|------------|-------|"
-        # Print the stored lines for this project, sorting them by repo name (second field)
-        printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2
-      done
-    } > summary.md
-  fi
+          # Check if any rows were generated
+          if [ ${#rows_data[@]} -eq 0 ]; then
+            echo "WARNING: No valid artifact data found to generate report." >&2
+            echo "# LFN Project Lifecycle Summary" > summary.md
+            echo "" >> summary.md
+            echo "*No project data processed successfully.*" >> summary.md
+          else
+            # Now generate the markdown AFTER collecting all data
+            {
+              echo "# LFN Project Lifecycle Summary"
+              # Sort projects alphabetically
+              for project in $(printf '%s\n' "${!rows_data[@]}" | sort); do
+                echo
+                echo "## $project"
+                echo "| Repository | Phase |"
+                echo "|------------|-------|"
+                # Print the stored lines for this project, sorting them by repo name (second field)
+                printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2
+              done
+            } > summary.md
+          fi
 
-  echo "Generated summary.md:" >&2
-  cat summary.md >&2
+          echo "Generated summary.md:" >&2
+          cat summary.md >&2
 
-  # Set output for potential use later
-  summary_content=$(cat summary.md)
-  {
-    echo 'summary<<EOF'
-    echo "$summary_content"
-    echo 'EOF'
-  } >> "$GITHUB_OUTPUT"
+          # Set output using recommended heredoc approach
+          {
+            echo 'summary<<EOF'
+            cat summary.md
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
-
-  # Add to job summary for easy viewing in Actions UI
-  cat summary.md >> "$GITHUB_STEP_SUMMARY"
-
+          # Add to job summary for easy viewing in Actions UI
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # Updates or creates a governance issue on the repo with the report content
       - name: Create or update governance issue
@@ -361,30 +388,46 @@ jobs:
           script: |
             const fs = require('fs');
             const core = require('@actions/core'); // Make sure core is available
-            const body = fs.readFileSync('summary.md', 'utf8');
+            const github = require('@actions/github'); // Make sure github is available
+            const context = github.context; // Get context correctly
+
+            // Read body AFTER checking file existence
+            let body = "Failed to read summary.md";
+            if (fs.existsSync('summary.md')) {
+              body = fs.readFileSync('summary.md', 'utf8');
+            } else {
+              core.warning("summary.md not found for issue creation/update.");
+            }
+
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const title = 'Automated LFN Project Lifecycle Summary';
+            const token = process.env.GITHUB_TOKEN; // Get token from env
 
-            // Ensure github context is available
-            const github = require('@actions/github').getOctokit(process.env.GITHUB_TOKEN);
+            if (!token) {
+              core.setFailed('GITHUB_TOKEN not found in environment.');
+              return;
+            }
+
+            const octokit = github.getOctokit(token);
 
             try {
-              const issues = await github.paginate(github.rest.issues.listForRepo, {
+              const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
                 owner, repo, labels: 'lfn-governance', state: 'open'
               });
 
               const existing = issues.find(i => i.title === title);
 
               if (existing) {
-                await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+                await octokit.rest.issues.update({ owner, repo, issue_number: existing.number, body });
                 core.info(`Updated issue #${existing.number}`);
               } else {
-                await github.rest.issues.create({ owner, repo, title, body, labels: ['lfn-governance'] });
+                await octokit.rest.issues.create({ owner, repo, title, body, labels: ['lfn-governance'] });
                 core.info('Created new governance issue');
               }
             } catch (error) {
               core.setFailed(`Failed to create or update issue: ${error.message}`);
+              console.error(error); // Log full error
             }
 
       # Optional notification to Slack channel (if webhook is configured)
