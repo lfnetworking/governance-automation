@@ -104,46 +104,43 @@ jobs:
           PROJECT_REPO: ${{ github.event.inputs.project_repo }}
         run: |
           set -euo pipefail
+          # Ensure essential tools are installed (moved check here)
+          if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
+          if ! command -v jq &> /dev/null; then echo "ERROR: jq not found." >&2; exit 1; fi
+          if [[ ! -f ".lfn/projects.yaml" ]] && [[ "$MODE" != "induction" ]]; then echo "ERROR: .lfn/projects.yaml not found!" >&2; exit 1; fi
+
           if [[ "$MODE" == "induction" ]]; then
-            echo "matrix=[\"${PROJECT_ORG}/${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
+            if [[ -z "$PROJECT_REPO" ]]; then echo "ERROR: Project repo slug must be provided for induction mode." >&2; exit 1; fi
+            # Basic validation of slug format
+            if ! echo "$PROJECT_REPO" | grep -q '/'; then echo "ERROR: Project repo slug must be in <org>/<repo> format." >&2; exit 1; fi
+            echo "matrix=[\"${PROJECT_REPO}\"]" >> "$GITHUB_OUTPUT"
+            echo "Matrix (Induction): [\"${PROJECT_REPO}\"]" >&2
           else
             declare -a matrix
-            # Ensure .lfn/projects.yaml exists before trying to read it
-            if [[ ! -f ".lfn/projects.yaml" ]]; then
-              echo "ERROR: .lfn/projects.yaml not found!" >&2
-              exit 1
-            fi
-            # Ensure gh is installed and authenticated if needed
-            if ! command -v gh &> /dev/null; then
-               echo "ERROR: gh cli not found. Please ensure it's installed on the runner." >&2
-               # Or add steps to install it
-               exit 1
-            fi
-             # Ensure jq is installed
-            if ! command -v jq &> /dev/null; then
-               echo "ERROR: jq not found. Please ensure it's installed on the runner." >&2
-               # Or add steps to install it
-               exit 1
-            fi
-            for org in $(yq -r '.orgs[]' .lfn/projects.yaml); do
-              echo "📦 $org" >&2
-              # Add error handling for gh repo list
-              repo_list_json=$(gh repo list "$org" --json name -q '.' 2>/dev/null)
-              if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]]; then
-                 echo "WARNING: Failed to list repos for $org or org is empty." >&2
+            for org in $(yq -r '.orgs[] // ""' .lfn/projects.yaml); do
+              if [[ -z "$org" ]]; then continue; fi # Skip empty org entries
+              echo "📦 Processing org: $org" >&2
+              repo_list_json=$(gh repo list "$org" --limit 1000 --json name -q '.' 2>/dev/null) # Increased limit
+              if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
+                 echo "WARNING: Failed to list repos for '$org' or org is empty/inaccessible." >&2
                  continue
               fi
-              for repo in $(echo "$repo_list_json" | jq -r '.[].name'); do
-                matrix+=("$org/$repo")
-              done
+              # Add repos to matrix
+              while IFS= read -r repo_name; do
+                 if [[ -n "$repo_name" ]]; then # Ensure repo name is not empty
+                    matrix+=("$org/$repo_name")
+                 fi
+              done < <(echo "$repo_list_json" | jq -r '.[].name')
             done
-            # Ensure matrix is not empty before creating JSON
+
             if [ ${#matrix[@]} -eq 0 ]; then
-              echo "ERROR: No repositories found to process." >&2
+              echo "ERROR: No repositories found to process after scanning .lfn/projects.yaml." >&2
               exit 1
             fi
+
+            # Generate JSON matrix output
             printf '%s\n' "${matrix[@]}" | jq -R . | jq -cs '.' | {
-              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix: $json" >&2; }
+              read json; echo "matrix=$json" >> "$GITHUB_OUTPUT"; echo "Matrix Size: ${#matrix[@]}" >&2; echo "Matrix Content: $json" >&2; }
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -151,6 +148,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   classify:
     needs: enumerate-projects
+    # Prevent running if the matrix is empty (e.g., enumerate failed)
+    if: ${{ needs.enumerate-projects.outputs.matrix != '[]' && needs.enumerate-projects.outputs.matrix != '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -164,7 +163,7 @@ jobs:
         with:
           ref: main # Explicitly check out main
 
-      # Step 2: Debug Step 1 (Can be removed later)
+      # Step 2: Debug Step 1 (Optional - Can be removed later)
       - name: Check workspace IMMEDIATELY after main checkout
         run: |
           echo "## Debug: Contents of workspace (${{ github.workspace }}) after checking out governance-automation:"
@@ -178,17 +177,17 @@ jobs:
           echo "-----------------------------------------------------"
 
       # Step 3: Checkout target repo
-      - name: Checkout target repo
-        id: checkout_target # ID is present
+      - name: Checkout target repo (${{ matrix.repo_slug }})
+        id: checkout_target # ID for referencing outcome/conclusion
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: repo
           fetch-depth: 1
-        continue-on-error: true # Correctly placed
+        continue-on-error: true # Correct placement
 
-      # Step 3.1: DEBUG - Check Checkout Outcome and Conclusion (Can be removed later)
-      - name: DEBUG - Check Checkout Outcome and Conclusion
+      # Step 3.1: DEBUG - Check Checkout Outcome and Conclusion (Optional - Can be removed later)
+      - name: DEBUG - Check Checkout Outcome and Conclusion (${{ matrix.repo_slug }})
         if: always()
         run: |
           echo "Outcome of step 'checkout_target': [${{ steps.checkout_target.outcome }}]"
@@ -196,10 +195,10 @@ jobs:
           echo "------------------------------------"
 
       # Step 4: Create default/error result file
-      - name: Create default/error result file
+      - name: Create default/error result file (${{ matrix.repo_slug }})
         run: |
           phase_value="Unknown"
-          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then # Checks conclusion
+          if [[ "${{ steps.checkout_target.conclusion }}" != "success" ]]; then
             phase_value="Checkout Failed"
             echo "::warning::Target repository checkout failed (conclusion: ${{ steps.checkout_target.conclusion }}). Setting phase to Checkout Failed."
           fi
@@ -207,15 +206,15 @@ jobs:
           echo "Created initial repo.json with phase: ${phase_value}"
 
       # Step 5: Setup Node.js
-      - name: Setup Node.js
-        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
+      - name: Setup Node.js (${{ matrix.repo_slug }})
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion
         uses: actions/setup-node@v4
         with:
           node-version: '16'
 
-      # Step 6: Debug Step 2 (Can be removed later)
-      - name: Check workspace BEFORE installing dependencies
-        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
+      # Step 6: Debug Step 2 (Optional - Can be removed later)
+      - name: Check workspace BEFORE installing dependencies (${{ matrix.repo_slug }})
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion
         run: |
           echo "## Debug: Contents of workspace (${{ github.workspace }}) just before npm install:"
           ls -la ${{ github.workspace }}
@@ -228,14 +227,14 @@ jobs:
           echo "-----------------------------------------------------"
 
       # Step 7: Install dependencies
-      - name: Install Action Dependencies
-        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
+      - name: Install Action Dependencies (${{ matrix.repo_slug }})
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion
         run: npm install # Using install as package-lock might be missing/stale
         working-directory: ${{ github.workspace }}/classify-config
 
-      # Step 7.1: DEBUG - Check node_modules after install (Can be removed later)
-      - name: DEBUG - Check node_modules after install
-        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
+      # Step 7.1: DEBUG - Check node_modules after install (Optional - Can be removed later)
+      - name: DEBUG - Check node_modules after install (${{ matrix.repo_slug }})
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion
         run: |
           echo "Listing contents of classify-config AFTER npm install:"
           ls -la ${{ github.workspace }}/classify-config
@@ -250,22 +249,22 @@ jobs:
           echo "------------------------------------"
 
       # Step 8: Run local action
-      - name: Run classification action
+      - name: Run classification action (${{ matrix.repo_slug }})
         id: classification
-        if: steps.checkout_target.conclusion == 'success' # Uses conclusion - CORRECT
+        if: steps.checkout_target.conclusion == 'success' # Uses conclusion
         uses: ./classify-config
         with:
           repo: ${{ matrix.repo_slug }}
           config_path: .github/workflows/classify-config.yml
 
       # Step 9: Sanitize name
-      - name: Sanitize artifact name
+      - name: Sanitize artifact name (${{ matrix.repo_slug }})
         id: sanitize
         run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT
 
-      # Step 10: DEBUG - Check repo.json before upload (Can be removed later)
-      - name: DEBUG - Check repo.json before upload
-        if: always() # Run even if previous steps failed
+      # Step 10: DEBUG - Check repo.json before upload (Optional - Can be removed later)
+      - name: DEBUG - Check repo.json before upload (${{ matrix.repo_slug }})
+        if: always()
         run: |
           echo "Checking final state before upload for ${{ matrix.repo_slug }}:"
           echo "pwd: $(pwd)"
@@ -276,11 +275,11 @@ jobs:
           echo "-----------------------------"
 
       # Step 11: Upload result
-      - name: Upload classification result
+      - name: Upload classification result (${{ matrix.repo_slug }})
         uses: actions/upload-artifact@v4
         with:
           name: "${{ steps.sanitize.outputs.safe_name }}.json"
-          path: repo.json # Uploads the final repo.json (either default or overwritten by action)
+          path: repo.json
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 📋 Publish Report: Aggregates results and posts Markdown summary to GitHub Issue
@@ -291,7 +290,8 @@ jobs:
     if: always() # Run even if classify jobs fail to generate partial report
     steps:
       # Downloads all previously uploaded repo.json files for processing
-      - uses: actions/download-artifact@v4
+      - name: Download classification artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts # Download all artifacts into artifacts/ directory
 
@@ -300,83 +300,86 @@ jobs:
         id: build-md
         shell: bash
         run: |
-      # Corrected run script for 'Build Markdown Report' step
-      set -euo pipefail
-      # Check if jq is installed, install if necessary
-      if ! command -v jq &> /dev/null; then
-        echo "jq not found, installing..." >&2
-        sudo apt-get update -y && sudo apt-get install -y jq
-      fi
-    
-      declare -A rows_data # Use associative array to store lines per project
-      echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
-      # Loop through artifact directories created by download-artifact
-      # Structure is artifacts/<artifact-name>/repo.json
-      find artifacts -mindepth 2 -maxdepth 2 -name 'repo.json' -print0 | while IFS= read -r -d $'\0' file; do
-        dir=$(dirname "$file")
-        slug=$(basename "$dir")
-        echo "Processing artifact directory: $dir, Slug: $slug" >&2
-        # Restore original slug format
-        full=${slug//--/\/}
-        project=${full%%/*}
-        repo=${full#*/}
-    
-        if [[ -f "$file" ]]; then
-          phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
-          # Handle potential jq errors or null values explicitly
-          if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
-            phase="Unknown"
-            echo "Warning: Could not parse phase or phase was null in $file. Setting to Unknown." >&2
+          # Corrected run script for 'Build Markdown Report' step v3
+          set -euo pipefail
+          # Check if jq is installed, install if necessary
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found, installing..." >&2
+            sudo apt-get update -y && sudo apt-get install -y jq
           fi
-        else
-          phase="Unknown (Missing JSON)"
-          echo "Warning: repo.json not found in $dir" >&2
-        fi
-    
-        # Store the formatted table row, keyed by project
-        row_line="| $repo | $phase |"
-        # Append using newline as a separator for multi-line values
-        if [[ -z "${rows_data[$project]:-}" ]]; then
-          rows_data[$project]="$row_line"
-        else
-          rows_data[$project]+=$'\n'"$row_line"
-        fi
-      done
-    
-      # Check if any rows were generated
-      if [ ${#rows_data[@]} -eq 0 ]; then
-        echo "WARNING: No valid artifact data found to generate report." >&2
-        echo "# LFN Project Lifecycle Summary" > summary.md
-        echo "" >> summary.md
-        echo "*No project data processed successfully.*" >> summary.md
-      else
-        # Now generate the markdown AFTER collecting all data
-        {
-          echo "# LFN Project Lifecycle Summary"
-          # Sort projects alphabetically by iterating through sorted keys
-          for project in $(printf '%s\n' "${!rows_data[@]}" | sort); do
-            echo
-            echo "## $project"
-            echo "| Repository | Phase |"
-            echo "|------------|-------|"
-            # Print the stored lines for this project, sorting them by repo name (second field)
-            printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2
+
+          declare -A rows_data # Associative array: key=project, value=multiline string of "| repo | phase |" rows
+          echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
+          # Loop through artifact directories created by download-artifact
+          # Structure is artifacts/<artifact-name>/repo.json
+          find artifacts -mindepth 2 -maxdepth 2 -name 'repo.json' -print0 | while IFS= read -r -d $'\0' file; do
+            dir=$(dirname "$file")
+            slug=$(basename "$dir")
+            # echo "Processing artifact directory: $dir, Slug: $slug" >&2 # Optional debug
+            # Restore original slug format
+            full=${slug//--/\/}
+            project=${full%%/*}
+            repo=${full#*/}
+
+            if [[ -f "$file" ]]; then
+              phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
+              # Handle potential jq errors or null values explicitly
+              if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
+                phase="Unknown"
+                echo "Warning: Could not parse phase or phase was null in $file ($slug). Setting to Unknown." >&2
+              fi
+            else
+              phase="Unknown (Missing JSON)"
+              echo "Warning: repo.json not found in $dir ($slug)" >&2
+            fi
+
+            # Store the formatted table row line for this repo under its project key
+            row_line="| $repo | $phase |"
+            # Append using newline as a separator
+            if [[ -z "${rows_data[$project]:-}" ]]; then
+              rows_data[$project]="$row_line"
+            else
+              rows_data[$project]+=$'\n'"$row_line"
+            fi
           done
-        } > summary.md
-      fi
-    
-      echo "Generated summary.md:" >&2
-      cat summary.md >&2
-    
-      # Set output using recommended heredoc approach
-      {
-        echo 'summary<<EOF'
-        cat summary.md
-        echo 'EOF'
-      } >> "$GITHUB_OUTPUT"
-    
-      # Add to job summary for easy viewing in Actions UI
-      cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Check if any rows were generated
+          if [ ${#rows_data[@]} -eq 0 ]; then
+            echo "WARNING: No valid artifact data found to generate report." >&2
+            echo "# LFN Project Lifecycle Summary" > summary.md
+            echo "" >> summary.md
+            echo "*No project data processed successfully.*" >> summary.md
+          else
+            # Now generate the markdown AFTER collecting all data
+            {
+              echo "# LFN Project Lifecycle Summary"
+              # Sort projects alphabetically by iterating through sorted keys
+              for project in $(printf '%s\n' "${!rows_data[@]}" | sort); do
+                echo
+                echo "## $project"
+                echo "| Repository | Phase |"
+                echo "|------------|-------|"
+                # Print the stored lines for this project, sorting them by repo name (second field)
+                # Use process substitution with sort to avoid subshell issues with the array
+                mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k2)
+                printf '%s\n' "${sorted_lines[@]}"
+              done
+            } > summary.md
+          fi
+
+          echo "Generated summary.md:" >&2
+          cat summary.md >&2
+
+          # Set output using recommended heredoc approach
+          {
+            echo 'summary<<EOF'
+            cat summary.md
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          # Add to job summary for easy viewing in Actions UI
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
 
       # Updates or creates a governance issue on the repo with the report content
       - name: Create or update governance issue
@@ -385,22 +388,24 @@ jobs:
           github-token: ${{ env.GITHUB_TOKEN }} # Use env var consistent with other steps
           script: |
             const fs = require('fs');
-            const core = require('@actions/core'); // Make sure core is available
-            const github = require('@actions/github'); // Make sure github is available
-            const context = github.context; // Get context correctly
+            const core = require('@actions/core');
+            const github = require('@actions/github');
+            const context = github.context;
 
-            // Read body AFTER checking file existence
             let body = "Failed to read summary.md";
+            // Check if file exists before reading
             if (fs.existsSync('summary.md')) {
               body = fs.readFileSync('summary.md', 'utf8');
             } else {
               core.warning("summary.md not found for issue creation/update.");
+              // Decide if you want to exit or post a default message
+              body = "Error: Workflow failed to generate summary report.";
             }
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const title = 'Automated LFN Project Lifecycle Summary';
-            const token = process.env.GITHUB_TOKEN; // Get token from env
+            const token = process.env.GITHUB_TOKEN;
 
             if (!token) {
               core.setFailed('GITHUB_TOKEN not found in environment.');
@@ -410,22 +415,36 @@ jobs:
             const octokit = github.getOctokit(token);
 
             try {
+              // Find existing issue with the specific title and label
+              // Note: Searching might be more robust if labels alone aren't unique enough
               const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
                 owner, repo, labels: 'lfn-governance', state: 'open'
               });
-
               const existing = issues.find(i => i.title === title);
 
               if (existing) {
-                await octokit.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+                core.info(`Found existing issue #${existing.number}. Updating...`);
+                await octokit.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body
+                });
                 core.info(`Updated issue #${existing.number}`);
               } else {
-                await octokit.rest.issues.create({ owner, repo, title, body, labels: ['lfn-governance'] });
+                core.info("No existing governance issue found. Creating new issue...");
+                await octokit.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body,
+                  labels: ['lfn-governance']
+                });
                 core.info('Created new governance issue');
               }
             } catch (error) {
-              core.setFailed(`Failed to create or update issue: ${error.message}`);
-              console.error(error); // Log full error
+              core.setFailed(`Failed to create or update governance issue: ${error.message}`);
+              console.error("Error details:", error);
             }
 
       # Optional notification to Slack channel (if webhook is configured)
