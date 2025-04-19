@@ -129,18 +129,35 @@ jobs:
       matrix:
         repo_slug: ${{ fromJson(needs.enumerate-projects.outputs.matrix) }}
     steps:
-      # Checkout this repo into a subfolder so local actions are available
+      # Checkout this repo (governance-automation) to the workspace root
       - name: Checkout governance-automation
         uses: actions/checkout@v4
-        with:
-          path: governance-automation
-
-      # Checkout the target project repo (being scanned)
+       
+      # Checkout the target project repo (being scanned) into a 'repo' subdirectory
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
-          path: repo
+          path: repo # This checkout is fine as it's for the target repo's code
+
+      # Run the local action relative to the workspace root
+      - name: Run classification action
+        uses: ./classify-config # Corrected path: relative to workspace root
+        with:
+          repo: ${{ matrix.repo_slug }}
+          config_path: .github/workflows/classify-config.yml # Corrected path: relative to workspace root
+
+      # Escapes the '/' in repo slugs for artifact naming (gh actions restriction)
+      - name: Sanitize artifact name
+        id: sanitize
+        run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT # Minor fix for echo syntax
+
+      # Upload the classification output (repo.json) for aggregation in report
+      - name: Upload classification result
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ steps.sanitize.outputs.safe_name }}.json"
+          path: repo.json
 
       # Run the local action relative to governance-automation folder
       - name: Run classification action
