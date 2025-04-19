@@ -95,7 +95,7 @@ const yaml = require('js-yaml');               // YAML parser for classify-confi
 
     // Output result to workflow and save as artifact
     core.setOutput('phase', selectedPhase);
-    fs.writeFileSync('repo.json', JSON.stringify({ repo: repoSlug, phase: selectedPhase }, null, 2));
+    fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/repo.json`, JSON.stringify({ repo: repoSlug, phase: selectedPhase }, null, 2));
   } catch (err) {
     core.setFailed(err.message);
   }
