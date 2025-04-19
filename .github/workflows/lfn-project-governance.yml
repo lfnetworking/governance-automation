@@ -79,14 +79,13 @@ permissions:
   issues: write           # Needed to create/update governance summary issues
   pull-requests: write    # Often needed by actions interacting with PRs (can potentially be reduced)
   id-token: write         # Needed if using OIDC for authentication (e.g., with external services, not currently used here but good practice if needed later)
+  actions: write          # Added: Needed for gh artifact upload
 
 # Environment variables available to all jobs in the workflow
 env:
   # Sets the GitHub token for all jobs. Using a specific LFN Admin Token for potentially elevated permissions if required across orgs.
   # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings.
   GITHUB_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
-  # BATCH_SIZE is no longer needed with the per-org strategy
-  # BATCH_SIZE: 100
 
 jobs:
   # =============================================================================
@@ -123,7 +122,7 @@ jobs:
           PROJECT_ORG: ${{ github.event.inputs.project_org }}
           # PROJECT_REPO is now handled within the classify job if provided for induction
         run: |
-          set -euo pipefail
+          set -euo pipefail # Keep strict mode here as it's simpler logic
 
           declare -a org_list
 
@@ -170,7 +169,7 @@ jobs:
   #          - Lists all repositories within the current organization.
   #          - Loops through each repository slug.
   #          - For each repo: Clones it, runs the classification Node.js script directly,
-  #            uploads the result artifact using GitHub CLI.
+  #            uploads the result artifact using GitHub CLI. Handles errors per repo.
   # =============================================================================
   classify:
     needs: enumerate-projects # Depends on the 'enumerate-projects' job
@@ -200,6 +199,7 @@ jobs:
         working-directory: ${{ github.workspace }}/classify-config
 
       # Step 2.4: Process all repositories within the current organization.
+      # This script now includes explicit error checking for each repo.
       - name: Process Repositories for Org ${{ matrix.org }}
         shell: bash
         env:
@@ -207,15 +207,21 @@ jobs:
           INDUCTION_REPO_SLUG: ${{ github.event.inputs.project_repo }}
           MODE: ${{ github.event.inputs.mode || 'review' }}
         run: |
-          set -e # Exit on first error during repo processing for this org
+          # Removed 'set -e'. We will check exit codes explicitly.
+          # set -e
 
           current_org="${{ matrix.org }}"
           config_path=".github/workflows/classify-config.yml" # Relative path within checked out code
+          repo_processed_count=0
+          repo_error_count=0
 
           # Check if gh is installed (needed for repo list and artifact upload)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
           # Authenticate gh CLI using the job's GITHUB_TOKEN
+          echo "Authenticating gh CLI..." >&2
           echo "${{ env.GITHUB_TOKEN }}" | gh auth login --with-token
+          if [[ $? -ne 0 ]]; then echo "ERROR: gh auth login failed." >&2; exit 1; fi
+          echo "gh CLI authenticated." >&2
 
           # --- List Repositories for the Current Org ---
           declare -a org_repos
@@ -228,14 +234,19 @@ jobs:
           else
              # Otherwise, list all public repos in the org
              repo_list_json=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>/dev/null)
-             if [[ $? -ne 0 ]] || [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
-                 echo "::warning::Failed to list repos for '$current_org' or org is empty/inaccessible. Skipping org."
+             gh_exit_code=$?
+             # Check if the 'gh repo list' command failed
+             if [[ $gh_exit_code -ne 0 ]]; then
+                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Skipping org."
+                 exit 1 # Fail the job if repo listing fails
+             fi
+             # Check if the list is empty or null
+             if [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
+                 echo "::warning::No public repositories found for '$current_org' or org is inaccessible. Skipping org."
                  exit 0 # Exit successfully, nothing to process for this org
              fi
              # Populate the array with <org>/<repo> slugs
-             while IFS= read -r repo_name; do
-                 if [[ -n "$repo_name" ]]; then org_repos+=("$current_org/$repo_name"); fi
-             done < <(echo "$repo_list_json" | jq -r '.[].name')
+             mapfile -t org_repos < <(echo "$repo_list_json" | jq -r '.[].name' | sed "s|^|$current_org/|") # Add org prefix
           fi
 
           echo "Found ${#org_repos[@]} repositories to process for $current_org." >&2
@@ -246,13 +257,15 @@ jobs:
 
           # --- Loop Through Repositories in this Org ---
           for repo_slug in "${org_repos[@]}"; do
-            if [[ -z "$repo_slug" ]]; then continue; fi # Should not happen, but safety check
+            if [[ -z "$repo_slug" ]]; then continue; fi # Safety check
 
+            echo # Add blank line for readability
             echo "--- Processing repository: $repo_slug ---" >&2
             target_repo_path="./repo_temp" # Temporary checkout path
             result_json_path="./repo_result.json" # Temporary result file path
             safe_name=$(echo "$repo_slug" | sed 's|/|--|g') # Sanitize name for artifact
             artifact_name="${safe_name}.json"
+            repo_failed=false # Flag for this specific repo
 
             # Clean up from previous iteration
             rm -f "$result_json_path"
@@ -260,6 +273,7 @@ jobs:
 
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
+            # Capture output AND exit code separately
             git_output=$(git clone --depth 1 "https://github-actions:${{ env.GITHUB_TOKEN }}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1)
             git_exit_code=$?
 
@@ -269,44 +283,70 @@ jobs:
               echo "Clone successful." >&2
               checkout_successful=true
             else
-              echo "::warning::Failed to clone $repo_slug. Exit code: $git_exit_code. Output: $git_output"
+              echo "::error::Failed to clone $repo_slug. Exit code: $git_exit_code."
+              echo "Git Output: $git_output" # Log git output on error
               phase_value="Checkout Failed"
+              repo_failed=true # Mark repo as failed
+              # Create result JSON for checkout failure
+              printf '{"phase": "%s", "error": "Checkout failed", "details": "%s"}\n' "$phase_value" "$(echo "$git_output" | jq -Rsa .)" > "$result_json_path"
             fi
 
             # --- Run Classification Script ---
             if [[ "$checkout_successful" == true ]]; then
               echo "Running classification script for $repo_slug..." >&2
-              # Execute the Node.js script directly
+              # Execute the Node.js script directly, capture exit code
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
               GITHUB_TOKEN="${{ env.GITHUB_TOKEN }}" \
               node "${{ github.workspace }}/classify-config/index.js"
+              node_exit_code=$?
 
-              # Check if script produced output and move it
-              if [[ -f "${{ github.workspace }}/repo.json" ]]; then
+              if [[ $node_exit_code -ne 0 ]]; then
+                 echo "::error::Classification script failed for $repo_slug with exit code $node_exit_code."
+                 phase_value="Classification Error"
+                 repo_failed=true
+                 # Create error JSON
+                 printf '{"phase": "%s", "error": "Classification script failed", "exit_code": %s}\n' "$phase_value" "$node_exit_code" > "$result_json_path"
+              # Check if script produced output file as expected
+              elif [[ -f "${{ github.workspace }}/repo.json" ]]; then
                  mv "${{ github.workspace }}/repo.json" "$result_json_path"
                  echo "Classification script ran, result moved to $result_json_path" >&2
-                 phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Unknown")
+                 phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
+                 if [[ "$phase_value" == "Read Error" ]]; then
+                    echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
+                    repo_failed=true
+                 fi
               else
                  echo "::error::Classification script did not produce repo.json for $repo_slug"
                  phase_value="Classification Error"
-                 printf '{"phase": "%s", "error": "Classification script failed"}\n' "$phase_value" > "$result_json_path"
+                 repo_failed=true
+                 printf '{"phase": "%s", "error": "Classification script did not produce output file"}\n' "$phase_value" > "$result_json_path"
               fi
-            else
-              # Create result JSON directly if checkout failed
-              printf '{"phase": "%s", "error": "Checkout failed"}\n' "$phase_value" > "$result_json_path"
-            fi
+            fi # end if checkout_successful
 
             echo "Final phase for $repo_slug: $phase_value" >&2
 
             # --- Upload Artifact ---
-            echo "Uploading artifact $artifact_name..." >&2
-            gh artifact upload "$result_json_path" --name "$artifact_name"
-            if [[ $? -ne 0 ]]; then
-              echo "::error::Failed to upload artifact $artifact_name for $repo_slug"
-              # Consider if this should be a fatal error for the org job
+            # Ensure result file exists before uploading
+            if [[ ! -f "$result_json_path" ]]; then
+               echo "::error::Result file $result_json_path not found for $repo_slug. Cannot upload artifact."
+               repo_failed=true
             else
-              echo "Artifact $artifact_name uploaded successfully." >&2
+               echo "Uploading artifact $artifact_name..." >&2
+               gh artifact upload "$result_json_path" --name "$artifact_name"
+               gh_artifact_exit_code=$?
+               if [[ $gh_artifact_exit_code -ne 0 ]]; then
+                 echo "::error::Failed to upload artifact $artifact_name for $repo_slug. gh exit code: $gh_artifact_exit_code"
+                 repo_failed=true # Mark repo as failed if upload fails
+               else
+                 echo "Artifact $artifact_name uploaded successfully." >&2
+               fi
+            fi
+
+            # Increment counters
+            ((repo_processed_count++))
+            if [[ "$repo_failed" == true ]]; then
+               ((repo_error_count++))
             fi
 
             # Clean up for next repo
@@ -316,7 +356,13 @@ jobs:
 
           done # End of loop through repos for the org
 
-          echo "Finished processing Org ${current_org}." >&2
+          echo "Finished processing Org ${current_org}. Processed: $repo_processed_count, Errors: $repo_error_count." >&2
+
+          # Optionally, fail the job if any repo failed within the org
+          # if [[ $repo_error_count -gt 0 ]]; then
+          #   echo "::error::Encountered $repo_error_count errors while processing repositories for $current_org."
+          #   exit 1
+          # fi
 
 
   # =============================================================================
@@ -330,8 +376,6 @@ jobs:
   #          - Builds the Markdown report ('summary.md') as before.
   #          - Uses github-script to find/create/update the summary issue.
   #          - Optionally notifies Slack.
-  # NOTE:    No changes are needed in this job compared to the previous version.
-  #          It correctly aggregates artifacts regardless of how they were generated.
   # =============================================================================
   publish-report:
     needs: classify # Depends on the completion of all 'classify' org jobs
@@ -369,10 +413,19 @@ jobs:
             repo=${full#*/}
 
             if [[ -f "$file" ]]; then
+              # Attempt to read phase, handle potential errors during read/parse
               phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
-              if [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
-                phase="Unknown"
-                echo "Warning: Could not parse phase or phase was null in $file ($artifact_name). Setting to Unknown." >&2
+              jq_exit_code=$?
+              # Check jq exit code and if phase is null/empty string
+              if [[ $jq_exit_code -ne 0 ]] || [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
+                # If jq failed or phase is empty/null, try reading error field
+                error_msg=$(jq -r '.error // ""' "$file" 2>/dev/null)
+                if [[ -n "$error_msg" ]]; then
+                   phase="Error: $error_msg" # Use error message as phase
+                else
+                   phase="Unknown (Parse Error)" # Fallback if no error field
+                fi
+                echo "Warning: Could not parse phase or phase was null/empty in $file ($artifact_name). Setting phase to '$phase'." >&2
               fi
             else
               phase="Unknown (Missing JSON)"
@@ -411,7 +464,8 @@ jobs:
                 echo "## $project"
                 echo "| Repository | Phase |"
                 echo "|------------|-------|"
-                mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | sort -t'|' -k3,3 -k2,2)
+                # Sort rows: Errors first, then by phase, then by repo name
+                mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | awk -F'|' '{ if ($3 ~ /Error|Failed|Unknown/) print "0"$0; else print "1"$0 }' | sort -t'|' -k1,1 -k3,3 -k2,2 | sed 's/^.//')
                 printf '%s\n' "${sorted_lines[@]}"
               done
             } > summary.md
