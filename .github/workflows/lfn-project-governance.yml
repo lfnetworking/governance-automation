@@ -151,42 +151,32 @@ jobs:
           fi
           echo "-----------------------------------------------------"
 
-      # Step 3: Checkout target repo (Correct placement of continue-on-error)
+      # Step 3: Checkout target repo
       - name: Checkout target repo
+        id: checkout_target # <<< ADD THIS ID
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_slug }}
           path: repo
           fetch-depth: 1
-        # 'continue-on-error' is NOT inside 'with:' block above
-        continue-on-error: true # <<< Correct placement (same level as name/uses/with)
+        continue-on-error: true # <<< Placement looks correct in your uploaded file
 
-      # Step 4: Check if target repo checkout succeeded
-      - name: Check if target repo checkout succeeded # Indented 2 spaces
-        id: check_repo
-        run: |
-          if [ -d "repo/.git" ] || [ -f "repo/README.md" ]; then # Check for .git or a common file
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Target repository ${{ matrix.repo_slug }} checkout seems successful."
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "::warning::Target repository ${{ matrix.repo_slug }} checkout failed or directory empty."
-          fi
-      
-      # Step 4.5: Create default/error result file (NEW STEP)
+      # Step 4: Create default/error result file (Modified)
       - name: Create default/error result file
-        id: create_default_result
+        # No id needed now unless used elsewhere
         run: |
           phase_value="Unknown" # Default if checkout succeeded but classification might fail later
-          if [[ "${{ steps.check_repo.outputs.exists }}" == "false" ]]; then
+          # Check the OUTCOME of the checkout step directly
+          if [[ "${{ steps.checkout_target.outcome }}" != "success" ]]; then
             phase_value="Checkout Failed"
+            echo "::warning::Target repository checkout failed (outcome: ${{ steps.checkout_target.outcome }}). Setting phase to Checkout Failed."
           fi
           echo "{\"phase\": \"${phase_value}\"}" > repo.json
-          echo "Created initial repo.json with phase: ${phase_value}"    
+          echo "Created initial repo.json with phase: ${phase_value}"  
 
-      # Step 5: Setup Node.js
-      - name: Setup Node.js # Indented 2 spaces
-        if: steps.check_repo.outputs.exists == 'true'
+      # Step 5: Setup Node.js (Updated 'if' condition)
+      - name: Setup Node.js
+        if: steps.checkout_target.outcome == 'success' # <<< UPDATED CONDITION
         uses: actions/setup-node@v4
         with:
           node-version: '16'
