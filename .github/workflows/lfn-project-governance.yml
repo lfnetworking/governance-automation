@@ -151,15 +151,15 @@ jobs:
           fi
           echo "-----------------------------------------------------"
 
-      # Step 3: Checkout target repo
+      # Step 3: Checkout target repo (Correct placement of continue-on-error)
       - name: Checkout target repo
         uses: actions/checkout@v4
-        with: # Inputs for the action go under 'with:'
+        with:
           repository: ${{ matrix.repo_slug }}
           path: repo
           fetch-depth: 1
-        # Step-level settings go at the same level as 'uses:' and 'with:'
-        continue-on-error: true # <<< CORRECT placement
+        # 'continue-on-error' is NOT inside 'with:' block above
+        continue-on-error: true # <<< Correct placement (same level as name/uses/with)
 
       # Step 4: Check if target repo checkout succeeded
       - name: Check if target repo checkout succeeded # Indented 2 spaces
@@ -172,6 +172,17 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "::warning::Target repository ${{ matrix.repo_slug }} checkout failed or directory empty."
           fi
+      
+      # Step 4.5: Create default/error result file (NEW STEP)
+      - name: Create default/error result file
+        id: create_default_result
+        run: |
+          phase_value="Unknown" # Default if checkout succeeded but classification might fail later
+          if [[ "${{ steps.check_repo.outputs.exists }}" == "false" ]]; then
+            phase_value="Checkout Failed"
+          fi
+          echo "{\"phase\": \"${phase_value}\"}" > repo.json
+          echo "Created initial repo.json with phase: ${phase_value}"    
 
       # Step 5: Setup Node.js
       - name: Setup Node.js # Indented 2 spaces
@@ -212,19 +223,6 @@ jobs:
       - name: Sanitize artifact name # Indented 2 spaces
         id: sanitize
         run: echo "safe_name=$(echo ${{ matrix.repo_slug }} | sed 's|/|--|g')" >> $GITHUB_OUTPUT
-
-      # Step 10: Create dummy result if needed
-      - name: Create result file if needed # Indented 2 spaces
-        if: steps.check_repo.outputs.exists == 'false' || steps.classification.outcome != 'success'
-        run: |
-          phase_value="Unknown"
-          if [[ "${{ steps.check_repo.outputs.exists }}" == "false" ]]; then
-            phase_value="Checkout Failed"
-          elif [[ "${{ steps.classification.outcome }}" != "success" ]]; then
-            phase_value="Classification Error"
-          fi
-          echo "{\"phase\": \"${phase_value}\"}" > repo.json
-          echo "Created placeholder repo.json with phase: ${phase_value}"
 
       # Step 11: Upload result
       - name: Upload classification result # Indented 2 spaces
