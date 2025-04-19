@@ -402,9 +402,9 @@ jobs:
           github-token: ${{ env.GITHUB_TOKEN }} # Use env var consistent with other steps
           script: |
             const fs = require('fs');
-            // const core = require('@actions/core'); // <--- REMOVED THIS LINE
-            const github = require('@actions/github');
-            const context = github.context;
+            // const core = require('@actions/core'); // <--- Already removed
+            // const github = require('@actions/github'); // <--- REMOVED THIS LINE
+            const context = github.context; // 'github' is provided by github-script
 
             let body = "Failed to read summary.md";
             // Check if file exists before reading
@@ -425,7 +425,7 @@ jobs:
               return;
             }
 
-            const octokit = github.getOctokit(token);
+            const octokit = github.getOctokit(token); // 'github' is provided by github-script
 
             try {
               // Find existing issue with the specific title and label
