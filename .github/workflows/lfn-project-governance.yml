@@ -152,13 +152,14 @@ jobs:
           echo "-----------------------------------------------------"
 
       # Step 3: Checkout target repo
-      - name: Checkout target repo # Indented 2 spaces
+      - name: Checkout target repo
         uses: actions/checkout@v4
-        with:
-          repository: ${{ matrix.repo_slug }} # Indented 4 spaces relative to "- name:"
-          path: repo                     # Indented 4 spaces relative to "- name:"
-          fetch-depth: 1                 # Indented 4 spaces relative to "- name:"
-          continue-on-error: true        # <<< SHOULD be indented 4 spaces relative to "- name:"
+        with: # Inputs for the action go under 'with:'
+          repository: ${{ matrix.repo_slug }}
+          path: repo
+          fetch-depth: 1
+        # Step-level settings go at the same level as 'uses:' and 'with:'
+        continue-on-error: true # <<< CORRECT placement
 
       # Step 4: Check if target repo checkout succeeded
       - name: Check if target repo checkout succeeded # Indented 2 spaces
@@ -195,7 +196,7 @@ jobs:
       # Step 7: Install dependencies
       - name: Install Action Dependencies # Indented 2 spaces
         if: steps.check_repo.outputs.exists == 'true'
-        run: npm ci
+        run: npm install
         working-directory: ${{ github.workspace }}/classify-config
 
       # Step 8: Run local action
