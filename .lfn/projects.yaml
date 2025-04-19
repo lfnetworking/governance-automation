@@ -1,11 +1,11 @@
 orgs:
   - nephio-project
- # - FDio
- # - opendaylight
- # - onap
- # - opnfv               # Anuket lives here
- # - 5G-Super-Blue-Print
- # - lfn-cnti
- # - l3af-project
- # - paraglider-project
- # - essedum-project
+  - FDio
+  - opendaylight
+  - onap
+  - opnfv               # Anuket lives here
+  - 5G-Super-Blue-Print
+  - lfn-cnti
+  - l3af-project
+  - paraglider-project
+  - essedum-project
