@@ -19,6 +19,7 @@ A GitHub Actions workflow runs automatically **every Monday at 09:00 UTC** (and 
 4.  **Generates Report:** Compiles the results for all processed repositories into a Markdown summary.
 5.  **Publishes Summary:** Creates or updates a GitHub Issue within *this* repository ([`lfnetworking/governance-automation`](https://github.com/lfnetworking/governance-automation)) containing the full Markdown summary report. The workflow run summary page also includes this report.
 6.  **(Optional) Notifies Slack:** Sends a notification to a configured Slack channel upon completion.
+7.  **(Future) Creates Guidance Issues:** Optionally (currently disabled), the workflow can create or update issues directly within *each classified repository* offering phase-specific guidance based on customizable templates.
 
 ## Key Components
 
@@ -26,17 +27,19 @@ A GitHub Actions workflow runs automatically **every Monday at 09:00 UTC** (and 
 * **Project List:** [`./.lfn/projects.yaml`](./.lfn/projects.yaml) - A simple list of LFN GitHub organization names whose repositories should be included in the analysis.
 * **Classification Logic:** [`./classify-config/`](./classify-config/) - Contains the custom JavaScript GitHub Action (`index.js`) that fetches repository metrics via the GitHub API and applies the classification rules.
 * **Classification Rules:** [`./.github/workflows/classify-config.yml`](./.github/workflows/classify-config.yml) - Defines the specific metrics and thresholds used to determine the lifecycle phase for each repository. This file is intended to be updated based on LFN TAC decisions.
-* **(Future) Issue Templates:** [`./.github/workflows/issues-config.yml`](./.github/workflows/issues-config.yml) - Defines templates for potentially creating phase-specific guidance issues directly in project repositories (functionality not yet fully enabled).
+* **Guidance Issue Templates:** [`./.github/workflows/issues-config.yml`](./.github/workflows/issues-config.yml) - **(Future Use)** Defines customizable templates (title, body, labels, assignees) for the *optional* phase-specific guidance issues that can be automatically created in each project's repository. This allows tailoring the automated feedback provided to projects based on their classified phase.
 
 ## Configuration & Requirements
 
 * **Organizations:** To add or remove an LFN project (organization) from the scan, update the list in [`./.lfn/projects.yaml`](./.lfn/projects.yaml).
 * **Lifecycle Rules:** To adjust the metrics or thresholds for lifecycle phases, modify [`./.github/workflows/classify-config.yml`](./.github/workflows/classify-config.yml). Changes should reflect decisions made by the LFN TAC.
+* **Guidance Issues:** To customize the content of the optional, phase-specific issues created in project repositories (when this feature is enabled), modify [`./.github/workflows/issues-config.yml`](./.github/workflows/issues-config.yml).
 * **Authentication:** The workflow requires a GitHub Personal Access Token (PAT) stored as a repository secret named `LFN_ADMIN_TOKEN`. This token needs sufficient **scopes** to:
     * List public repositories across the configured organizations (`public_repo` or `repo` scope).
     * Read repository metadata (`public_repo` or `repo` scope).
     * Upload workflow artifacts (`actions:write` scope).
     * Create/update issues in *this* repository (`issues:write` scope).
+    * *(Future)* Create/update issues in the target project repositories (requires broader `issues:write` permissions, likely via the `repo` scope on the PAT, if the optional guidance issue feature is enabled).
 
 ## Contributing
 
@@ -59,7 +62,7 @@ Contributions and feedback from the LFN community are welcome!
 | ✅ Confirm new lifecycle phases        | [![I#4](https://img.shields.io/github/issues/detail/state/lfnetworking/governance-automation/4?label=%234)](https://github.com/lfnetworking/governance-automation/issues/4) |
 | 🎯 Refine automatable metrics per phase | [![I#5](https://img.shields.io/github/issues/detail/state/lfnetworking/governance-automation/5?label=%235)](https://github.com/lfnetworking/governance-automation/issues/5) |
 | 🚀 Implement & test **induction** mode | Open                                                                                                                                |
-| 💡 Create per-repo guidance issues    | Open                                                                                                                                |
+| 💡 Enable & test per-repo guidance issues | Open                                                                                                                                |
 | 🛡️ Integrate OSSF Scorecard checks     | Open                                                                                                                                |
 
 ---
