@@ -218,8 +218,10 @@ jobs:
           # Pass the config path env var to the script environment
           CLASSIFY_CONFIG_FILE_PATH: ${{ env.CLASSIFY_CONFIG_PATH }}
           CLASSIFY_ACTION_DIR: ${{ env.CLASSIFY_ACTION_PATH }}
-          # Explicitly set GH_TOKEN for gh CLI
+          # Explicitly set GH_TOKEN for gh CLI commands needing the PAT
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
+          # Make the default GITHUB_TOKEN available for artifact upload
+          DEFAULT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Enable strict error checking
           set -euo pipefail
@@ -235,9 +237,9 @@ jobs:
           # Check if gh is installed (needed for repo list and artifact upload)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
           # Verify authentication using the provided token (GH_TOKEN takes precedence)
-          echo "Verifying gh CLI authentication..." >&2
+          echo "Verifying gh CLI authentication (using LFN_ADMIN_TOKEN)..." >&2
           gh auth status || { echo "ERROR: gh auth status failed. Check token (LFN_ADMIN_TOKEN) permissions/validity/scopes (needs repo or public_repo)." >&2; exit 1; }
-          echo "gh CLI authenticated." >&2
+          echo "gh CLI authenticated with LFN_ADMIN_TOKEN." >&2
 
 
           # --- List Repositories for the Current Org ---
@@ -373,14 +375,14 @@ jobs:
                repo_failed=true
                # Create a placeholder artifact if needed by publish-report
                printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
-               # Use GH_TOKEN explicitly for artifact upload, capture output
-               upload_output=$(GH_TOKEN=${GH_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
+               # Use DEFAULT_GITHUB_TOKEN explicitly for artifact upload, capture output
+               upload_output=$(GH_TOKEN=${DEFAULT_GITHUB_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
                gh_artifact_exit_code=$? # Still capture exit code
                echo "::error::Placeholder artifact upload attempted for missing file. Exit code: $gh_artifact_exit_code. Output: $upload_output"
             else
                echo "Uploading artifact $artifact_name..." >&2
-               # Use GH_TOKEN explicitly for artifact upload, capture output
-               upload_output=$(GH_TOKEN=${GH_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
+               # Use DEFAULT_GITHUB_TOKEN explicitly for artifact upload, capture output
+               upload_output=$(GH_TOKEN=${DEFAULT_GITHUB_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
                gh_artifact_exit_code=$?
                # Check exit code explicitly
                if [[ $gh_artifact_exit_code -ne 0 ]]; then
