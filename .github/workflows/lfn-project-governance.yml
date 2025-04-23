@@ -56,7 +56,7 @@ on:
       mode:
         description: "Choose the run mode: 'test' (runs on subset?), 'review' (standard run), 'induction' (runs on specific repo/org)"
         required: true
-        default: "review" # Default to standard review mode
+        default: "test" # Default to standard review mode
         type: choice
         options: [test, review, induction]
       # Input for the organization, used only in 'induction' mode
@@ -91,7 +91,7 @@ env:
   CLASSIFY_CONFIG_PATH: '.lfn/classify-config.yml' # Path to the classification rules
   ISSUES_CONFIG_PATH: '.lfn/issues-config.yml' # Path to issue templates
   CLASSIFY_ACTION_PATH: './classify-config' # Path to the local JS action directory
-  GOVERNANCE_ISSUE_TITLE: "Quarterly LFN Governance & Lifecycle Review" # Standard title for created issues
+  GOVERNANCE_ISSUE_TITLE: "Quarterly LFN Project Governance & Lifecycle Review" # Standard title for created issues
 
 
 jobs:
@@ -167,18 +167,18 @@ jobs:
 
 
   # =============================================================================
-  # JOB 2: Classify Repositories per Organization
+  # JOB 2: Classify Repositories per Organization (Sequential)
   # PURPOSE: Runs the classification logic for all repositories within a specific organization.
   #          This job uses a matrix strategy based on the organizations identified previously.
   # INPUT:   The 'matrix' output from 'enumerate-projects', containing organization names.
   # PROCESS: - For each organization job instance:
   #          - Checks out the main governance-automation repo.
   #          - Sets up Node.js and installs dependencies for the local action.
-  #          - Lists all repositories within the current organization.
+  #          - Lists all non-archived repositories within the current organization.
   #          - Loops through each repository slug.
   #          - For each repo: Clones it, runs the classification Node.js script directly,
   #            saves the result to a uniquely named file in a results directory.
-  #          - After the loop, uses actions/upload-artifact to upload all results.
+  #          - After the loop, uses actions/upload-artifact to upload all results for the org.
   # =============================================================================
   classify:
     needs: enumerate-projects # Depends on the 'enumerate-projects' job
@@ -251,10 +251,12 @@ jobs:
           if [[ "$MODE" == "induction" ]] && [[ -n "$INDUCTION_REPO_SLUG" ]] && [[ "$INDUCTION_REPO_SLUG" == "$current_org/"* ]]; then
              echo "Induction mode with specific repo: $INDUCTION_REPO_SLUG" >&2
              # Check if the induction repo name contains 'archived'
-             if [[ "$INDUCTION_REPO_SLUG" != *archived* ]]; then
-                org_repos+=("$INDUCTION_REPO_SLUG")
+             repo_name_only=$(basename "$INDUCTION_REPO_SLUG")
+             if [[ "$repo_name_only" == *archived* ]] || [[ "$repo_name_only" == *Archived* ]]; then
+                echo "::warning::Skipping induction repo as its name contains 'archived': $INDUCTION_REPO_SLUG" >&2
+                org_repos=() # Ensure list is empty
              else
-                echo "Skipping induction repo as it contains 'archived': $INDUCTION_REPO_SLUG" >&2
+                org_repos+=("$INDUCTION_REPO_SLUG")
              fi
           else
              echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --visibility=public -q '.'" >&2
@@ -561,17 +563,31 @@ jobs:
             }
             // Use the pre-authenticated 'github' object provided by the action
             try {
-              const issues = await github.paginate(github.rest.issues.listForRepo, {
-                owner, repo, labels: 'lfn-governance', state: 'open'
+              const { data: issues } = await github.rest.issues.listForRepo({ // Use github.rest directly
+                owner,
+                repo,
+                labels: 'lfn-governance',
+                state: 'open'
               });
               const existing = issues.find(i => i.title === title);
               if (existing) {
                 core.info(`Found existing issue #${existing.number}. Updating...`);
-                await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+                await github.rest.issues.update({ // Use github.rest directly
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body
+                });
                 core.info(`Updated issue #${existing.number}`);
               } else {
                 core.info("No existing governance issue found. Creating new issue...");
-                await github.rest.issues.create({ owner, repo, title, body, labels: ['lfn-governance'] });
+                await github.rest.issues.create({ // Use github.rest directly
+                  owner,
+                  repo,
+                  title,
+                  body,
+                  labels: ['lfn-governance']
+                });
                 core.info('Created new governance issue');
               }
             } catch (error) {
