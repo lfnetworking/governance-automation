@@ -177,7 +177,7 @@ jobs:
   #          - Lists all repositories within the current organization.
   #          - Loops through each repository slug.
   #          - For each repo: Clones it, runs the classification Node.js script directly,
-  #            uploads the result artifact using GitHub CLI. Handles errors per repo.
+  #            uploads the result artifact using GitHub CLI (using default token). Handles errors per repo.
   # =============================================================================
   classify:
     needs: enumerate-projects # Depends on the 'enumerate-projects' job
@@ -218,8 +218,10 @@ jobs:
           # Pass the config path env var to the script environment
           CLASSIFY_CONFIG_FILE_PATH: ${{ env.CLASSIFY_CONFIG_PATH }}
           CLASSIFY_ACTION_DIR: ${{ env.CLASSIFY_ACTION_PATH }}
-          # Explicitly set GH_TOKEN for gh CLI (uses LFN_ADMIN_TOKEN)
+          # Explicitly set GH_TOKEN for gh CLI commands needing the PAT
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
+          # Make the default GITHUB_TOKEN available for artifact upload
+          DEFAULT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Enable strict error checking
           set -euo pipefail
@@ -374,16 +376,14 @@ jobs:
                repo_failed=true
                # Create a placeholder artifact if needed by publish-report
                printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
-               # Use GH_TOKEN explicitly for artifact upload, capture output
-               # Use the main GH_TOKEN (PAT) for upload
-               upload_output=$(gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
+               # Use DEFAULT_GITHUB_TOKEN explicitly for artifact upload, capture output
+               upload_output=$(GH_TOKEN=${DEFAULT_GITHUB_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
                gh_artifact_exit_code=$? # Still capture exit code
                echo "::error::Placeholder artifact upload attempted for missing file. Exit code: $gh_artifact_exit_code. Output: $upload_output"
             else
                echo "Uploading artifact $artifact_name..." >&2
-               # Use GH_TOKEN explicitly for artifact upload, capture output
-               # Use the main GH_TOKEN (PAT) for upload
-               upload_output=$(gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
+               # Use DEFAULT_GITHUB_TOKEN explicitly for artifact upload, capture output
+               upload_output=$(GH_TOKEN=${DEFAULT_GITHUB_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
                gh_artifact_exit_code=$?
                # Check exit code explicitly
                if [[ $gh_artifact_exit_code -ne 0 ]]; then
