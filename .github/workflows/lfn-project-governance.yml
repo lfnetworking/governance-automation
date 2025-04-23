@@ -194,25 +194,29 @@ jobs:
              done
           fi
 
-          # Also add any initial slugs from single-repo induction mode
+          # Create temp file (even if empty) to avoid errors later
+          touch temp_slugs.txt
+
+          # Also add any initial slugs from single-repo induction mode (if the list is not empty)
+          # This check is safe because the array is always declared
           if [[ ${#initial_repo_slug_list[@]} -gt 0 ]]; then
              printf '%s\n' "${initial_repo_slug_list[@]}" >> temp_slugs.txt
           fi
+
           # Add slugs collected from org loops
           if [[ -n "$all_repo_slugs_string" ]]; then
-             echo -n "$all_repo_slugs_string" >> temp_slugs.txt
+             # Use printf for safer handling of potential special characters
+             printf '%s' "$all_repo_slugs_string" >> temp_slugs.txt
           fi
 
-          # Populate the final array from the temp file, ensuring it exists even if empty
+          # Populate the final array from the temp file
           declare -a repo_slug_list
-          if [[ -f temp_slugs.txt ]]; then
-             mapfile -t repo_slug_list < <(cat temp_slugs.txt | grep -v '^$') # Read non-empty lines into the array
-             rm temp_slugs.txt
-          fi
-          # If the file didn't exist (no repos found at all), repo_slug_list remains declared but empty.
+          mapfile -t repo_slug_list < <(cat temp_slugs.txt | grep -v '^$') # Read non-empty lines into the array
+          rm temp_slugs.txt
+          # repo_slug_list is now populated or empty
 
           # --- Create Matrix ---
-          total_repos=${#repo_slug_list[@]} # Now access the length
+          total_repos=${#repo_slug_list[@]} # Access the length safely now
           echo "Total repositories to process: $total_repos" >&2
 
           if [ $total_repos -eq 0 ]; then
@@ -377,9 +381,10 @@ jobs:
         if: always() # Upload result even if script failed
         with:
           # Create a unique artifact name for each repo result using a safe version of the slug
+          # Replace / with -- for artifact name compatibility
           name: result-${{ matrix.repo_slug }}
           # Path to the specific JSON file created in the previous step
-          # Corrected path to match the simplified results_dir
+          # Use the safe_name variable which was already calculated
           path: ./classification-result/${{ matrix.repo_slug }}.json
           retention-days: 5 # Optional: Adjust retention
 
