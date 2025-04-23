@@ -334,18 +334,21 @@ jobs:
                  printf '{"phase": "%s", "error": "Classification script failed", "exit_code": %s}\n' "$phase_value" "$node_exit_code" > "$result_json_path"
               elif [[ -f "repo.json" ]]; then
                  # Move the generated repo.json to the final destination
-                 mv "repo.json" "$result_json_path" || { echo "::error::Failed to move repo.json to $result_json_path"; repo_failed=true; }
-                 if [[ "$repo_failed" == false ]]; then
-                   echo "Classification script ran, result saved to $result_json_path" >&2
-                   phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
-                   if [[ "$phase_value" == "Read Error" ]]; then
-                      echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
-                      repo_failed=true
-                      printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
-                   fi
-                 else
-                    # If mv failed, create error json
+                 echo "DEBUG: Moving repo.json to $result_json_path"
+                 mv "repo.json" "$result_json_path"
+                 mv_exit_code=$?
+                 if [[ $mv_exit_code -ne 0 ]]; then
+                    echo "::error::Failed to move repo.json to $result_json_path (exit code $mv_exit_code)"
+                    repo_failed=true
                     printf '{"phase": "%s", "error": "Failed to move script output"}\n' "Classification Error" > "$result_json_path"
+                 else
+                    echo "Classification script ran, result saved to $result_json_path" >&2
+                    phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
+                    if [[ "$phase_value" == "Read Error" ]]; then
+                       echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
+                       repo_failed=true
+                       printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
+                    fi
                  fi
               else
                  echo "::error::Classification script completed successfully but did not produce repo.json for $repo_slug"
@@ -356,22 +359,45 @@ jobs:
             fi # end if checkout_successful
 
             echo "Final phase for $repo_slug: $phase_value" >&2
+            echo "DEBUG: Just logged final phase."
 
             # --- Artifact Upload moved to separate step ---
 
-            # Increment counters (Removed || { ... } error handling)
+            # Increment counters
+            echo "DEBUG: Incrementing repo_processed_count..."
             ((repo_processed_count++))
+            echo "DEBUG: repo_processed_count is now $repo_processed_count"
+
             if [[ "$repo_failed" == true ]]; then
+               echo "DEBUG: Incrementing repo_error_count..."
                ((repo_error_count++))
+               echo "DEBUG: repo_error_count is now $repo_error_count"
                # Ensure an error file exists if repo failed before file creation
                if [[ ! -f "$result_json_path" ]]; then
-                  printf '{"phase": "Error", "error": "Processing failed before result generation"}\n' > "$result_json_path" || { echo "::error::Failed write placeholder error file"; exit 1; }
+                  echo "DEBUG: Creating placeholder error file..."
+                  printf '{"phase": "Error", "error": "Processing failed before result generation"}\n' > "$result_json_path"
+                  printf_exit_code=$?
+                  if [[ $printf_exit_code -ne 0 ]]; then
+                     echo "::error::Failed write placeholder error file with exit code $printf_exit_code"
+                     # Decide if this is fatal enough to exit
+                     # exit 1
+                  fi
+                  echo "DEBUG: Placeholder error file created."
                fi
             fi
+            echo "DEBUG: Finished repo_failed check."
 
             # Clean up repo clone for next iteration
-            rm -rf "$target_repo_path" || echo "Warning: Failed to remove $target_repo_path"
+            echo "DEBUG: Removing target repo path: $target_repo_path"
+            rm -rf "$target_repo_path"
+            rm_exit_code=$?
+            if [[ $rm_exit_code -ne 0 ]]; then
+               echo "::warning::Failed to remove $target_repo_path (exit code $rm_exit_code)"
+            fi
+            echo "DEBUG: Target repo path removal attempted."
+
             echo "--- Finished processing repository: $repo_slug ---" >&2
+            echo "DEBUG: End of loop iteration for $repo_slug."
 
           done # End of loop through repos for the org
 
