@@ -132,7 +132,7 @@ jobs:
           # set -x # Uncomment for extreme debugging
 
           declare -a org_list
-          declare -a repo_slug_list
+          declare -a repo_slug_list # Ensure it's always declared as an array
 
           # --- Determine Target Orgs ---
           if [[ "$MODE" == "induction" ]]; then
@@ -146,9 +146,9 @@ jobs:
               fi
               # Check if the specified repo name contains 'archived'
               repo_name_only=$(basename "$PROJECT_REPO")
-              if [[ "$repo_name_only" == *archived* ]]; then
+              if [[ "$repo_name_only" == *archived* ]] || [[ "$repo_name_only" == *Archived* ]]; then # Case-insensitive check
                  echo "::warning::Skipping induction repo as its name contains 'archived': $PROJECT_REPO" >&2
-                 repo_slug_list=() # Ensure list is empty
+                 # repo_slug_list is already empty due to declare -a
               else
                  repo_slug_list+=("$PROJECT_REPO")
               fi
@@ -180,33 +180,40 @@ jobs:
              for org in "${org_list[@]}"; do
                 echo "Listing repos for: $org" >&2
                 # List repos, get names, filter out archived, prepend org name
-                gh repo list "$org" --limit 1000 --json name --visibility=public -q '.' \
+                # Use process substitution and mapfile for safer handling of repo names
+                mapfile -t current_org_repos < <( \
+                   gh repo list "$org" --limit 1000 --json name --visibility=public -q '.' \
                    | jq -r '.[].name' \
                    | grep -vi 'archived' \
                    | sed "s|^|$org/|" \
-                   | while IFS= read -r repo_slug; do repo_slug_list+=("$repo_slug"); done
-                # Check pipe status if needed, though set -o pipefail should handle it
+                )
+                # Append the found repos to the main list
+                repo_slug_list+=( "${current_org_repos[@]}" )
              done
           fi
 
           # --- Create Matrix ---
           total_repos=${#repo_slug_list[@]}
           echo "Total repositories to process: $total_repos" >&2
+
           if [ $total_repos -eq 0 ]; then
-            echo "::warning::No repositories found to process after filtering."
-            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
-            exit 0 # Exit successfully but with empty matrix
+             echo "::warning::No repositories found to process after filtering."
+             # Explicitly set empty matrix if no repos found
+             final_matrix_json="{\"include\":[]}"
+          else
+             # Prepare the 'include' array for the matrix only if repos exist
+             matrix_include_json=$(printf '%s\n' "${repo_slug_list[@]}" | jq -R '{repo_slug: .}' | jq -sc .)
+             # Final matrix object structure
+             final_matrix_json="{\"include\":${matrix_include_json}}"
           fi
-
-          # Prepare the 'include' array for the matrix: [ {"repo_slug": "org1/repoA"}, {"repo_slug": "org1/repoB"}, ... ]
-          matrix_include_json=$(printf '%s\n' "${repo_slug_list[@]}" | jq -R '{repo_slug: .}' | jq -sc .)
-
-          # Final matrix object structure: { "include": [ { "repo_slug": "org1/repoA" }, ... ] }
-          final_matrix_json="{\"include\":${matrix_include_json}}"
 
           echo "matrix=${final_matrix_json}" >> "$GITHUB_OUTPUT"
           echo "Generated matrix for $total_repos repositories." >&2
-          echo "Matrix structure preview: $(echo $final_matrix_json | jq -c . | cut -c 1-200)..." >&2
+          if [ $total_repos -gt 0 ]; then
+             echo "Matrix structure preview: $(echo $final_matrix_json | jq -c . | cut -c 1-200)..." >&2
+          else
+             echo "Matrix is empty." >&2
+          fi
 
 
   # =============================================================================
@@ -269,7 +276,8 @@ jobs:
           config_path="$CLASSIFY_CONFIG_FILE_PATH"
           action_dir="$CLASSIFY_ACTION_DIR"
           # Create a unique results directory for this job instance to avoid conflicts
-          results_dir="./classification-result-${repo_slug//\//--}"
+          # Use a simpler name for the results directory, job runner ensures isolation
+          results_dir="./classification-result"
           mkdir -p "$results_dir"
 
           target_repo_path="./repo_temp" # Local path for cloning
@@ -349,10 +357,10 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always() # Upload result even if script failed
         with:
-          # Create a unique artifact name for each repo result
+          # Create a unique artifact name for each repo result using a safe version of the slug
           name: result-${{ matrix.repo_slug }}
-          # Path to the unique results directory created in the previous step
-          path: ./classification-result-${{ matrix.repo_slug }}/*.json
+          # Path to the specific JSON file created in the previous step
+          path: ./classification-result/${{ matrix.repo_slug }}.json
           retention-days: 5 # Optional: Adjust retention
 
 
