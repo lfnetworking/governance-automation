@@ -208,7 +208,7 @@ jobs:
         working-directory: ${{ env.CLASSIFY_ACTION_PATH }}
 
       # Step 2.4: Process all repositories within the current organization.
-      # This script now includes explicit error checking and debug tracing (set -x).
+      # This script now includes explicit error checking.
       - name: Process Repositories for Org ${{ matrix.org }}
         shell: bash
         env:
@@ -218,9 +218,12 @@ jobs:
           # Pass the config path env var to the script environment
           CLASSIFY_CONFIG_FILE_PATH: ${{ env.CLASSIFY_CONFIG_PATH }}
           CLASSIFY_ACTION_DIR: ${{ env.CLASSIFY_ACTION_PATH }}
+          # Explicitly set GH_TOKEN for gh CLI (uses the job's GITHUB_TOKEN env var by default)
+          GH_TOKEN: ${{ env.GITHUB_TOKEN }}
         run: |
-          # Enable command tracing for detailed debugging output
-          set -x
+          # Enable strict error checking
+          set -euo pipefail
+          # set -x # Uncomment for extreme debugging
 
           current_org="${{ matrix.org }}"
           # Use the env var passed from the job step
@@ -231,11 +234,11 @@ jobs:
 
           # Check if gh is installed (needed for repo list and artifact upload)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
-          # Authenticate gh CLI using the job's GITHUB_TOKEN
-          echo "Authenticating gh CLI..." >&2
-          echo "${{ env.GITHUB_TOKEN }}" | gh auth login --with-token
-          if [[ $? -ne 0 ]]; then echo "ERROR: gh auth login failed." >&2; exit 1; fi
+          # gh CLI should automatically use GH_TOKEN or GITHUB_TOKEN from env
+          echo "Verifying gh CLI authentication..." >&2
+          gh auth status || { echo "ERROR: gh auth status failed. Check token permissions/validity." >&2; exit 1; }
           echo "gh CLI authenticated." >&2
+
 
           # --- List Repositories for the Current Org ---
           declare -a org_repos
@@ -247,9 +250,10 @@ jobs:
              org_repos+=("$INDUCTION_REPO_SLUG")
           else
              # Otherwise, list all public repos in the org
-             # Capture stdout and stderr, add || true, check exit code immediately after
-             repo_list_output=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>&1 || true) # ADDED || true
-             gh_exit_code=$? # Capture exit code immediately
+             # Capture stdout and stderr, check exit code immediately after
+             echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --public -q '.'" >&2
+             repo_list_output=$(gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>&1)
+             gh_exit_code=$?
              echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
              echo "gh repo list output: $repo_list_output" >&2 # Log output (contains names or error)
 
@@ -257,9 +261,9 @@ jobs:
              if [[ $gh_exit_code -ne 0 ]]; then
                  echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope), org existence, and org access control settings (e.g., SAML SSO authorization for the token)."
                  # Decide whether to fail the job or just skip the org
-                 # exit 1 # Fail the job if repo listing fails
-                 echo "::warning::Skipping organization $current_org due to repo list failure."
-                 exit 0 # Exit successfully for this job instance, but skip processing repos
+                 exit 1 # Fail the job if repo listing fails
+                 # echo "::warning::Skipping organization $current_org due to repo list failure."
+                 # exit 0 # Exit successfully for this job instance, but skip processing repos
              fi
              # Extract JSON part if successful (gh outputs only JSON names with -q '.')
              repo_list_json="$repo_list_output"
@@ -297,8 +301,7 @@ jobs:
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
             # Capture output AND exit code separately
-            # Added || true to prevent immediate exit if clone fails, rely on exit code check
-            git_output=$(git clone --depth 1 "https://github-actions:${{ env.GITHUB_TOKEN }}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1 || true)
+            git_output=$(git clone --depth 1 "https://github-actions:${GH_TOKEN}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1)
             git_exit_code=$?
 
             phase_value="Unknown"
@@ -320,12 +323,12 @@ jobs:
             if [[ "$checkout_successful" == true ]]; then
               echo "Running classification script for $repo_slug..." >&2
               # Execute the Node.js script directly, capture exit code
-              # Added || true to prevent immediate exit if node fails, rely on exit code check
               # Pass the config path from the environment variable
+              # Ensure GITHUB_TOKEN is explicitly passed to the script's environment
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
-              GITHUB_TOKEN="${{ env.GITHUB_TOKEN }}" \
-              node "${action_dir}/index.js" || true # Use action_dir variable
+              GITHUB_TOKEN="${GH_TOKEN}" \
+              node "${action_dir}/index.js"
               node_exit_code=$?
 
               # Check exit code explicitly
@@ -363,13 +366,14 @@ jobs:
             if [[ ! -f "$result_json_path" ]]; then
                echo "::error::Result file $result_json_path not found for $repo_slug. Cannot upload artifact."
                repo_failed=true
-               # Optionally create a placeholder artifact if needed by publish-report
-               # printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
-               # gh artifact upload "$result_json_path" --name "$artifact_name" || true
+               # Create a placeholder artifact if needed by publish-report
+               printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
+               gh artifact upload "$result_json_path" --name "$artifact_name"
+               gh_artifact_exit_code=$? # Still capture exit code
+               echo "::error::Placeholder artifact upload attempted for missing file. Exit code: $gh_artifact_exit_code"
             else
                echo "Uploading artifact $artifact_name..." >&2
-               # Added || true to prevent immediate exit if upload fails, rely on exit code check
-               gh artifact upload "$result_json_path" --name "$artifact_name" || true
+               gh artifact upload "$result_json_path" --name "$artifact_name"
                gh_artifact_exit_code=$?
                # Check exit code explicitly
                if [[ $gh_artifact_exit_code -ne 0 ]]; then
