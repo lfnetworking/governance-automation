@@ -79,12 +79,12 @@ permissions:
   issues: write           # Needed to create/update governance summary issues
   pull-requests: write    # Often needed by actions interacting with PRs (can potentially be reduced)
   id-token: write         # Needed if using OIDC for authentication (e.g., with external services, not currently used here but good practice if needed later)
-  actions: write          # Needed for gh artifact upload
+  actions: write          # Needed for gh artifact upload (grants permission to the default GITHUB_TOKEN)
 
 # Environment variables available to all jobs in the workflow
 env:
   # Sets the GitHub token for all jobs. Using a specific LFN Admin Token for potentially elevated permissions if required across orgs.
-  # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings and has appropriate scopes (e.g., 'repo').
+  # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings and has appropriate scopes (e.g., 'repo', 'actions:write').
   GITHUB_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
   PROJECT_CONFIG_PATH: '.lfn/projects.yaml'
   # --- PATH UPDATED ---
@@ -218,7 +218,7 @@ jobs:
           # Pass the config path env var to the script environment
           CLASSIFY_CONFIG_FILE_PATH: ${{ env.CLASSIFY_CONFIG_PATH }}
           CLASSIFY_ACTION_DIR: ${{ env.CLASSIFY_ACTION_PATH }}
-          # Explicitly set GH_TOKEN for gh CLI (uses the job's GITHUB_TOKEN env var by default)
+          # Explicitly set GH_TOKEN for gh CLI
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
         run: |
           # Enable strict error checking
@@ -234,9 +234,9 @@ jobs:
 
           # Check if gh is installed (needed for repo list and artifact upload)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
-          # gh CLI should automatically use GH_TOKEN or GITHUB_TOKEN from env
+          # Verify authentication using the provided token (GH_TOKEN takes precedence)
           echo "Verifying gh CLI authentication..." >&2
-          gh auth status || { echo "ERROR: gh auth status failed. Check token permissions/validity." >&2; exit 1; }
+          gh auth status || { echo "ERROR: gh auth status failed. Check token (LFN_ADMIN_TOKEN) permissions/validity/scopes (needs repo or public_repo)." >&2; exit 1; }
           echo "gh CLI authenticated." >&2
 
 
@@ -252,6 +252,7 @@ jobs:
              # Otherwise, list all public repos in the org
              # Capture stdout and stderr, check exit code immediately after
              echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --public -q '.'" >&2
+             # Use GH_TOKEN explicitly for the command
              repo_list_output=$(gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>&1)
              gh_exit_code=$?
              echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
@@ -301,6 +302,7 @@ jobs:
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
             # Capture output AND exit code separately
+            # Use GH_TOKEN for authentication within the URL
             git_output=$(git clone --depth 1 "https://github-actions:${GH_TOKEN}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1)
             git_exit_code=$?
 
@@ -324,7 +326,7 @@ jobs:
               echo "Running classification script for $repo_slug..." >&2
               # Execute the Node.js script directly, capture exit code
               # Pass the config path from the environment variable
-              # Ensure GITHUB_TOKEN is explicitly passed to the script's environment
+              # Ensure GITHUB_TOKEN is explicitly passed to the script's environment (Node script uses GITHUB_TOKEN)
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
               GITHUB_TOKEN="${GH_TOKEN}" \
@@ -368,16 +370,19 @@ jobs:
                repo_failed=true
                # Create a placeholder artifact if needed by publish-report
                printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
-               gh artifact upload "$result_json_path" --name "$artifact_name"
+               # Use GH_TOKEN explicitly for artifact upload, capture output
+               upload_output=$(GH_TOKEN=${GH_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
                gh_artifact_exit_code=$? # Still capture exit code
-               echo "::error::Placeholder artifact upload attempted for missing file. Exit code: $gh_artifact_exit_code"
+               echo "::error::Placeholder artifact upload attempted for missing file. Exit code: $gh_artifact_exit_code. Output: $upload_output"
             else
                echo "Uploading artifact $artifact_name..." >&2
-               gh artifact upload "$result_json_path" --name "$artifact_name"
+               # Use GH_TOKEN explicitly for artifact upload, capture output
+               upload_output=$(GH_TOKEN=${GH_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
                gh_artifact_exit_code=$?
                # Check exit code explicitly
                if [[ $gh_artifact_exit_code -ne 0 ]]; then
-                 echo "::error::Failed to upload artifact $artifact_name for $repo_slug. gh exit code: $gh_artifact_exit_code"
+                 echo "::error::Failed to upload artifact $artifact_name for $repo_slug. gh exit code: $gh_artifact_exit_code."
+                 echo "gh artifact upload output: $upload_output" # Log output on error
                  repo_failed=true # Mark repo as failed if upload fails
                else
                  echo "Artifact $artifact_name uploaded successfully." >&2
