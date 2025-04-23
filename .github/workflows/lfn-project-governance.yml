@@ -223,8 +223,9 @@ jobs:
           # Explicitly set GH_TOKEN for gh CLI (uses LFN_ADMIN_TOKEN)
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
         run: |
-          # Enable strict error checking
-          set -euo pipefail
+          # REMOVED strict error checking to allow loop to continue on single repo failure
+          # set -euo pipefail
+          set -o pipefail # Keep pipefail
           # set -x # Uncomment for extreme debugging
 
           current_org="${{ matrix.org }}"
@@ -235,7 +236,7 @@ jobs:
           repo_error_count=0
 
           # Create results directory
-          mkdir -p "$results_dir"
+          mkdir -p "$results_dir" || { echo "::error::Failed to create results directory '$results_dir'"; exit 1; }
 
           # Check if gh is installed (needed for repo list)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
@@ -260,14 +261,22 @@ jobs:
              if [[ $gh_exit_code -ne 0 ]]; then
                  echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code."
                  echo "gh repo list output on error: $repo_list_output" >&2
+                 # Exit non-zero to fail the job if listing fails
                  exit 1
              fi
              repo_list_json="$repo_list_output"
              if echo "$repo_list_json" | jq -e '. == null or length == 0' > /dev/null; then
                  echo "::warning::No public repositories found for '$current_org' or org is inaccessible. Skipping org."
+                 # Exit zero because no repos is not a failure of the script itself
                  exit 0
              fi
-             mapfile -t org_repos < <(echo "$repo_list_json" | jq -r '.[].name' | sed "s|^|$current_org/|")
+             # Use temporary file for mapfile input to handle potential large outputs safely
+             jq -r '.[].name' <<< "$repo_list_json" > repo_names.tmp
+             mapfile -t repo_names_array < repo_names.tmp
+             rm repo_names.tmp
+             for name in "${repo_names_array[@]}"; do
+                org_repos+=("$current_org/$name")
+             done
           fi
 
           echo "Found ${#org_repos[@]} repositories to process for $current_org." >&2
@@ -289,7 +298,7 @@ jobs:
             repo_failed=false
 
             # Clean up from previous iteration (only target repo dir)
-            rm -rf "$target_repo_path"
+            rm -rf "$target_repo_path" || echo "Warning: Failed to remove $target_repo_path"
 
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
@@ -312,8 +321,7 @@ jobs:
             # --- Run Classification Script ---
             if [[ "$checkout_successful" == true ]]; then
               echo "Running classification script for $repo_slug..." >&2
-              # Run node script, save output to temporary file first
-              temp_node_output="node_output.json"
+              # Run node script
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
               GITHUB_TOKEN="${GH_TOKEN}" \
@@ -327,13 +335,18 @@ jobs:
                  printf '{"phase": "%s", "error": "Classification script failed", "exit_code": %s}\n' "$phase_value" "$node_exit_code" > "$result_json_path"
               elif [[ -f "repo.json" ]]; then
                  # Move the generated repo.json to the final destination
-                 mv "repo.json" "$result_json_path"
-                 echo "Classification script ran, result saved to $result_json_path" >&2
-                 phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
-                 if [[ "$phase_value" == "Read Error" ]]; then
-                    echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
-                    repo_failed=true
-                    printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
+                 mv "repo.json" "$result_json_path" || { echo "::error::Failed to move repo.json to $result_json_path"; repo_failed=true; }
+                 if [[ "$repo_failed" == false ]]; then
+                   echo "Classification script ran, result saved to $result_json_path" >&2
+                   phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
+                   if [[ "$phase_value" == "Read Error" ]]; then
+                      echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
+                      repo_failed=true
+                      printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
+                   fi
+                 else
+                    # If mv failed, create error json
+                    printf '{"phase": "%s", "error": "Failed to move script output"}\n' "Classification Error" > "$result_json_path"
                  fi
               else
                  echo "::error::Classification script completed successfully but did not produce repo.json for $repo_slug"
@@ -351,10 +364,14 @@ jobs:
             ((repo_processed_count++))
             if [[ "$repo_failed" == true ]]; then
                ((repo_error_count++))
+               # Ensure an error file exists if repo failed before file creation
+               if [[ ! -f "$result_json_path" ]]; then
+                  printf '{"phase": "Error", "error": "Processing failed before result generation"}\n' > "$result_json_path"
+               fi
             fi
 
             # Clean up repo clone for next iteration
-            rm -rf "$target_repo_path"
+            rm -rf "$target_repo_path" || echo "Warning: Failed to remove $target_repo_path"
             echo "--- Finished processing repository: $repo_slug ---" >&2
 
           done # End of loop through repos for the org
@@ -400,6 +417,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts # Download all artifacts into subdirectories here
+
+      # Step 3.1.1: DEBUG - List downloaded files
+      - name: List downloaded files
+        if: always()
+        run: |
+          echo "Listing contents of ./artifacts directory:"
+          ls -R artifacts || echo "Artifacts directory not found or empty."
+          echo "-----------------------------------------"
 
       # Step 3.2: Build the Markdown Summary Report.
       - name: Build Markdown Report
@@ -464,6 +489,7 @@ jobs:
                   rows_data[$project]+=$'\n'"$row_line"
                 fi
               # Find *.json files within any subdirectory of artifacts/
+              # Corrected find command for the structure created by upload-artifact
               done < <(find artifacts -mindepth 2 -name '*.json' -print0)
 
 
