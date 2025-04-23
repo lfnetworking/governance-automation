@@ -462,34 +462,42 @@ jobs:
           else
               # Find all downloaded JSON files (*.json) inside the artifact directories (e.g., artifacts/org--repo.json/*.json)
               while IFS= read -r -d $'\0' file; do
+                # Check if the found item is actually a file before processing
+                if [[ ! -f "$file" ]]; then
+                    echo "Warning: Skipping non-file item found by find: $file" >&2
+                    continue
+                fi
+
                 dir=$(dirname "$file") # Directory is artifacts/org--repo.json
                 artifact_name_with_ext=$(basename "$dir") # org--repo.json
-                artifact_name=${artifact_name_with_ext%.json} # org--repo
+                # Handle cases where artifact name might not have .json (though it should)
+                if [[ "$artifact_name_with_ext" == *.json ]]; then
+                    artifact_name=${artifact_name_with_ext%.json} # org--repo
+                else
+                    artifact_name=$artifact_name_with_ext
+                    echo "Warning: Artifact directory name '$artifact_name_with_ext' did not end in .json" >&2
+                fi
+
 
                 full=${artifact_name//--/\/}
                 project=${full%%/*}
                 repo=${full#*/}
 
-                if [[ -f "$file" ]]; then
-                  # Attempt to read phase, handle potential errors during read/parse
-                  phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
-                  jq_exit_code=$?
-                  # Check jq exit code and if phase is null/empty string
-                  if [[ $jq_exit_code -ne 0 ]] || [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
-                    # If jq failed or phase is empty/null, try reading error field
-                    error_msg=$(jq -r '.error // ""' "$file" 2>/dev/null)
-                    if [[ -n "$error_msg" ]]; then
-                       # Sanitize error message for Markdown table (optional)
-                       # error_msg=$(echo "$error_msg" | sed 's/|/\\|/g')
-                       phase="Error: $error_msg" # Use error message as phase
-                    else
-                       phase="Unknown (Parse Error)" # Fallback if no error field
-                    fi
-                    echo "Warning: Could not parse phase or phase was null/empty in $file ($artifact_name). Setting phase to '$phase'." >&2
+                # Attempt to read phase, handle potential errors during read/parse
+                phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
+                jq_exit_code=$?
+                # Check jq exit code and if phase is null/empty string
+                if [[ $jq_exit_code -ne 0 ]] || [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
+                  # If jq failed or phase is empty/null, try reading error field
+                  error_msg=$(jq -r '.error // ""' "$file" 2>/dev/null)
+                  if [[ -n "$error_msg" ]]; then
+                     # Sanitize error message for Markdown table (optional)
+                     # error_msg=$(echo "$error_msg" | sed 's/|/\\|/g')
+                     phase="Error: $error_msg" # Use error message as phase
+                  else
+                     phase="Unknown (Parse Error)" # Fallback if no error field
                   fi
-                else
-                  phase="Unknown (Missing JSON)"
-                  echo "Warning: JSON file not found in $dir ($artifact_name)" >&2
+                  echo "Warning: Could not parse phase or phase was null/empty in $file ($artifact_name). Setting phase to '$phase'." >&2
                 fi
 
                 row_line="| [$repo](https://github.com/$project/$repo) | $phase |"
@@ -503,10 +511,10 @@ jobs:
 
 
               if [ ${#rows_data[@]} -eq 0 ]; then
-                echo "WARNING: No valid artifact data found to generate report, although artifacts directory exists." >&2
+                echo "WARNING: No valid artifact data found to generate report, although artifacts directory exists and files were found." >&2
                 echo "# LFN Project Lifecycle Summary" > summary.md
                 echo "" >> summary.md
-                echo "*No project data processed successfully. Check the 'classify' job logs for errors.*" >> summary.md
+                echo "*No project data processed successfully. Check the 'classify' job logs and artifact contents for errors.*" >> summary.md
               else
                 {
                   echo "# LFN Project Lifecycle Summary"
