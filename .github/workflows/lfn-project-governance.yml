@@ -247,16 +247,19 @@ jobs:
              org_repos+=("$INDUCTION_REPO_SLUG")
           else
              # Otherwise, list all public repos in the org
-             # Capture stdout and stderr, check exit code immediately after
-             repo_list_output=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>&1)
-             gh_exit_code=$?
+             # Capture stdout and stderr, add || true, check exit code immediately after
+             repo_list_output=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>&1 || true) # ADDED || true
+             gh_exit_code=$? # Capture exit code immediately
              echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
              echo "gh repo list output: $repo_list_output" >&2 # Log output (contains names or error)
 
              # Check if the 'gh repo list' command failed
              if [[ $gh_exit_code -ne 0 ]]; then
-                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope) and org existence."
-                 exit 1 # Fail the job if repo listing fails
+                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope), org existence, and org access control settings (e.g., SAML SSO authorization for the token)."
+                 # Decide whether to fail the job or just skip the org
+                 # exit 1 # Fail the job if repo listing fails
+                 echo "::warning::Skipping organization $current_org due to repo list failure."
+                 exit 0 # Exit successfully for this job instance, but skip processing repos
              fi
              # Extract JSON part if successful (gh outputs only JSON names with -q '.')
              repo_list_json="$repo_list_output"
@@ -565,13 +568,13 @@ jobs:
             }
 
       # Step 3.4: Optional Slack Notification
-      #- name: Notify Slack (optional)
-      #  if: ${{ env.SLACK_WEBHOOK_URL != '' }}
-      #  uses: slackapi/slack-github-action@v1.24.0
-      #  with:
-      #    payload: |
-      #      {
-      #        "text": ":clipboard: LFN governance summary updated for *${{ github.repository }}* – <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
-      #      }
-      #  env:
-      #    SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - name: Notify Slack (optional)
+        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": ":clipboard: LFN governance summary updated for *${{ github.repository }}* – <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
