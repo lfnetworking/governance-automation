@@ -223,11 +223,9 @@ jobs:
           # Explicitly set GH_TOKEN for gh CLI (uses LFN_ADMIN_TOKEN)
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
         run: |
-          # REMOVED strict error checking to allow loop to continue on single repo failure
-          # set -euo pipefail
-          # set -o pipefail # Keep pipefail
-          # Re-enable command tracing
-          set -x
+          # Re-enable strict error checking
+          set -euo pipefail
+          # set -x # Uncomment for extreme debugging
 
           current_org="${{ matrix.org }}"
           config_path="$CLASSIFY_CONFIG_FILE_PATH"
@@ -361,10 +359,10 @@ jobs:
 
             # --- Artifact Upload moved to separate step ---
 
-            # Increment counters
-            ((repo_processed_count++)) || { echo "::error::Failed to increment repo_processed_count"; exit 1; }
+            # Increment counters (Removed || { ... } error handling)
+            ((repo_processed_count++))
             if [[ "$repo_failed" == true ]]; then
-               ((repo_error_count++)) || { echo "::error::Failed to increment repo_error_count"; exit 1; }
+               ((repo_error_count++))
                # Ensure an error file exists if repo failed before file creation
                if [[ ! -f "$result_json_path" ]]; then
                   printf '{"phase": "Error", "error": "Processing failed before result generation"}\n' > "$result_json_path" || { echo "::error::Failed write placeholder error file"; exit 1; }
