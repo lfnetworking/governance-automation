@@ -486,6 +486,7 @@ jobs:
                   echo "Warning: Could not parse phase or phase was null/empty in $file ($artifact_name). Setting phase to '$phase'." >&2
                 fi
 
+                # Construct the markdown table row correctly with pipes
                 row_line="| [$repo](https://github.com/$project/$repo) | $phase |"
                 if [[ -z "${rows_data[$project]:-}" ]]; then
                   rows_data[$project]="$row_line"
@@ -519,9 +520,11 @@ jobs:
                     echo "## $project"
                     echo "| Repository | Phase |"
                     echo "|------------|-------|"
-                    # Sort rows: Errors/Unknown first, then by phase, then by repo name
-                    mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /^Error|^Unknown|^Checkout Failed|^Classification Error/) print "0"$0; else print "1"$0 }' | sort -t'|' -k1,1 -k3,3 -k2,2 | sed 's/^.//')
-                    printf '%s\n' "${sorted_lines[@]}"
+                    # Sort rows and print directly, ensuring correct format
+                    printf '%s\n' "${rows_data[$project]}" \
+                      | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /^Error|^Unknown|^Checkout Failed|^Classification Error/) print "0"$0; else print "1"$0 }' \
+                      | sort -t'|' -k1,1 -k3,3 -k2,2 \
+                      | sed 's/^.//'
                   done
                 } > summary.md
               fi
