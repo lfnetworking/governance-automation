@@ -253,7 +253,8 @@ jobs:
              # Use --visibility=public instead of deprecated --public
              # Capture stdout only (stderr goes to runner log), check exit code immediately after
              echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --visibility=public -q '.'" >&2
-             repo_list_json=$(gh repo list "$current_org" --limit 1000 --json name --visibility=public -q '.')
+             # Use GH_TOKEN explicitly for the command
+             repo_list_output=$(gh repo list "$current_org" --limit 1000 --json name --visibility=public -q '.' 2>&1)
              gh_exit_code=$?
              echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
 
@@ -262,10 +263,12 @@ jobs:
                  # Log the captured stderr from the command if it failed
                  echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope), org existence, and org access control settings (e.g., SAML SSO authorization for the token)."
                  # It's better to log the actual error output if available
-                 # echo "gh repo list output on error: $repo_list_json" # repo_list_json would contain stderr here
+                 echo "gh repo list output on error: $repo_list_output" >&2
                  exit 1 # Fail the job if repo listing fails
              fi
 
+             # Assign the potentially clean JSON output
+             repo_list_json="$repo_list_output"
              # Check if the list is empty or null (JSON check)
              # Use jq to check if the result is an empty array or null
              if echo "$repo_list_json" | jq -e '. == null or length == 0' > /dev/null; then
@@ -457,8 +460,7 @@ jobs:
               # Create an empty report if no artifacts were downloaded
               echo "# LFN Project Lifecycle Summary" > summary.md
               echo "" >> summary.md
-              echo "*No artifacts found. Check 'classify' job logs for errors (e.g., artifact upload failures).*
-" >> summary.md
+              echo "*No artifacts found. Check 'classify' job logs for errors (e.g., artifact upload failures).*" >> summary.md
           else
               # Find all downloaded JSON files (*.json) inside the artifact directories (e.g., artifacts/org--repo.json/*.json)
               while IFS= read -r -d $'\0' file; do
