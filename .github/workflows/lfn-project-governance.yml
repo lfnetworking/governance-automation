@@ -250,25 +250,22 @@ jobs:
              org_repos+=("$INDUCTION_REPO_SLUG")
           else
              # Otherwise, list all public repos in the org
-             # Capture stdout and stderr, check exit code immediately after
              # Use --visibility=public instead of deprecated --public
+             # Capture stdout only (stderr goes to runner log), check exit code immediately after
              echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --visibility=public -q '.'" >&2
-             # Use GH_TOKEN explicitly for the command
-             repo_list_output=$(gh repo list "$current_org" --limit 1000 --json name --visibility=public -q '.' 2>&1)
+             repo_list_json=$(gh repo list "$current_org" --limit 1000 --json name --visibility=public -q '.')
              gh_exit_code=$?
              echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
-             # Only log output if command failed, as success output is just JSON
-             if [[ $gh_exit_code -ne 0 ]]; then
-                echo "gh repo list output on error: $repo_list_output" >&2
-             fi
 
              # Check if the 'gh repo list' command failed
              if [[ $gh_exit_code -ne 0 ]]; then
+                 # Log the captured stderr from the command if it failed
                  echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope), org existence, and org access control settings (e.g., SAML SSO authorization for the token)."
+                 # It's better to log the actual error output if available
+                 # echo "gh repo list output on error: $repo_list_json" # repo_list_json would contain stderr here
                  exit 1 # Fail the job if repo listing fails
              fi
-             # Assign the potentially clean JSON output
-             repo_list_json="$repo_list_output"
+
              # Check if the list is empty or null (JSON check)
              # Use jq to check if the result is an empty array or null
              if echo "$repo_list_json" | jq -e '. == null or length == 0' > /dev/null; then
@@ -276,7 +273,7 @@ jobs:
                  exit 0 # Exit successfully, nothing to process for this org
              fi
              # Populate the array with <org>/<repo> slugs
-             # This jq command should now work reliably as the input is expected to be clean JSON
+             # This jq command should now work reliably as the input is clean JSON
              mapfile -t org_repos < <(echo "$repo_list_json" | jq -r '.[].name' | sed "s|^|$current_org/|")
           fi
 
@@ -454,76 +451,86 @@ jobs:
           declare -A rows_data
           echo "Scanning artifacts directory: $(pwd)/artifacts" >&2
 
-          # Find all downloaded JSON files (*.json) inside the artifact directories (e.g., artifacts/org--repo.json/*.json)
-          while IFS= read -r -d $'\0' file; do
-            dir=$(dirname "$file") # Directory is artifacts/org--repo.json
-            artifact_name_with_ext=$(basename "$dir") # org--repo.json
-            artifact_name=${artifact_name_with_ext%.json} # org--repo
-
-            full=${artifact_name//--/\/}
-            project=${full%%/*}
-            repo=${full#*/}
-
-            if [[ -f "$file" ]]; then
-              # Attempt to read phase, handle potential errors during read/parse
-              phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
-              jq_exit_code=$?
-              # Check jq exit code and if phase is null/empty string
-              if [[ $jq_exit_code -ne 0 ]] || [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
-                # If jq failed or phase is empty/null, try reading error field
-                error_msg=$(jq -r '.error // ""' "$file" 2>/dev/null)
-                if [[ -n "$error_msg" ]]; then
-                   # Sanitize error message for Markdown table (optional)
-                   # error_msg=$(echo "$error_msg" | sed 's/|/\\|/g')
-                   phase="Error: $error_msg" # Use error message as phase
-                else
-                   phase="Unknown (Parse Error)" # Fallback if no error field
-                fi
-                echo "Warning: Could not parse phase or phase was null/empty in $file ($artifact_name). Setting phase to '$phase'." >&2
-              fi
-            else
-              phase="Unknown (Missing JSON)"
-              echo "Warning: JSON file not found in $dir ($artifact_name)" >&2
-            fi
-
-            row_line="| [$repo](https://github.com/$project/$repo) | $phase |"
-            if [[ -z "${rows_data[$project]:-}" ]]; then
-              rows_data[$project]="$row_line"
-            else
-              rows_data[$project]+=$'\n'"$row_line"
-            fi
-          # Find *.json files exactly two levels deep (artifacts/<artifact_name>/result.json)
-          done < <(find artifacts -mindepth 2 -maxdepth 2 -name '*.json' -print0)
-
-
-          if [ ${#rows_data[@]} -eq 0 ]; then
-            echo "WARNING: No valid artifact data found to generate report." >&2
-            echo "# LFN Project Lifecycle Summary" > summary.md
-            echo "" >> summary.md
-            echo "*No project data processed successfully. Check the 'classify' job logs for errors.*" >> summary.md
+          # Check if artifacts directory exists and has content
+          if [ ! -d "artifacts" ] || [ -z "$(ls -A artifacts)" ]; then
+              echo "WARNING: Artifacts directory is missing or empty. No artifacts to process."
+              # Create an empty report if no artifacts were downloaded
+              echo "# LFN Project Lifecycle Summary" > summary.md
+              echo "" >> summary.md
+              echo "*No artifacts found. Check 'classify' job logs for errors (e.g., artifact upload failures).*
+" >> summary.md
           else
-            {
-              echo "# LFN Project Lifecycle Summary"
-              echo ""
-              echo "Generated on: $(date -u)"
-              echo "Workflow Run: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>"
-              echo ""
-              sorted_projects=()
-              while IFS= read -r key; do
-                  sorted_projects+=("$key")
-              done < <(printf '%s\n' "${!rows_data[@]}" | sort)
+              # Find all downloaded JSON files (*.json) inside the artifact directories (e.g., artifacts/org--repo.json/*.json)
+              while IFS= read -r -d $'\0' file; do
+                dir=$(dirname "$file") # Directory is artifacts/org--repo.json
+                artifact_name_with_ext=$(basename "$dir") # org--repo.json
+                artifact_name=${artifact_name_with_ext%.json} # org--repo
 
-              for project in "${sorted_projects[@]}"; do
-                echo
-                echo "## $project"
-                echo "| Repository | Phase |"
-                echo "|------------|-------|"
-                # Sort rows: Errors/Unknown first, then by phase, then by repo name
-                mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /^Error|^Unknown|^Checkout Failed|^Classification Error/) print "0"$0; else print "1"$0 }' | sort -t'|' -k1,1 -k3,3 -k2,2 | sed 's/^.//')
-                printf '%s\n' "${sorted_lines[@]}"
-              done
-            } > summary.md
-          fi
+                full=${artifact_name//--/\/}
+                project=${full%%/*}
+                repo=${full#*/}
+
+                if [[ -f "$file" ]]; then
+                  # Attempt to read phase, handle potential errors during read/parse
+                  phase=$(jq -r '.phase // "Unknown"' "$file" 2>/dev/null)
+                  jq_exit_code=$?
+                  # Check jq exit code and if phase is null/empty string
+                  if [[ $jq_exit_code -ne 0 ]] || [[ -z "$phase" ]] || [[ "$phase" == "null" ]]; then
+                    # If jq failed or phase is empty/null, try reading error field
+                    error_msg=$(jq -r '.error // ""' "$file" 2>/dev/null)
+                    if [[ -n "$error_msg" ]]; then
+                       # Sanitize error message for Markdown table (optional)
+                       # error_msg=$(echo "$error_msg" | sed 's/|/\\|/g')
+                       phase="Error: $error_msg" # Use error message as phase
+                    else
+                       phase="Unknown (Parse Error)" # Fallback if no error field
+                    fi
+                    echo "Warning: Could not parse phase or phase was null/empty in $file ($artifact_name). Setting phase to '$phase'." >&2
+                  fi
+                else
+                  phase="Unknown (Missing JSON)"
+                  echo "Warning: JSON file not found in $dir ($artifact_name)" >&2
+                fi
+
+                row_line="| [$repo](https://github.com/$project/$repo) | $phase |"
+                if [[ -z "${rows_data[$project]:-}" ]]; then
+                  rows_data[$project]="$row_line"
+                else
+                  rows_data[$project]+=$'\n'"$row_line"
+                fi
+              # Find *.json files exactly two levels deep (artifacts/<artifact_name>/result.json)
+              done < <(find artifacts -mindepth 2 -maxdepth 2 -name '*.json' -print0)
+
+
+              if [ ${#rows_data[@]} -eq 0 ]; then
+                echo "WARNING: No valid artifact data found to generate report, although artifacts directory exists." >&2
+                echo "# LFN Project Lifecycle Summary" > summary.md
+                echo "" >> summary.md
+                echo "*No project data processed successfully. Check the 'classify' job logs for errors.*" >> summary.md
+              else
+                {
+                  echo "# LFN Project Lifecycle Summary"
+                  echo ""
+                  echo "Generated on: $(date -u)"
+                  echo "Workflow Run: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>"
+                  echo ""
+                  sorted_projects=()
+                  while IFS= read -r key; do
+                      sorted_projects+=("$key")
+                  done < <(printf '%s\n' "${!rows_data[@]}" | sort)
+
+                  for project in "${sorted_projects[@]}"; do
+                    echo
+                    echo "## $project"
+                    echo "| Repository | Phase |"
+                    echo "|------------|-------|"
+                    # Sort rows: Errors/Unknown first, then by phase, then by repo name
+                    mapfile -t sorted_lines < <(printf '%s\n' "${rows_data[$project]}" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /^Error|^Unknown|^Checkout Failed|^Classification Error/) print "0"$0; else print "1"$0 }' | sort -t'|' -k1,1 -k3,3 -k2,2 | sed 's/^.//')
+                    printf '%s\n' "${sorted_lines[@]}"
+                  done
+                } > summary.md
+              fi
+          fi # End check for artifacts directory
 
           echo "Generated summary.md:" >&2
           cat summary.md >&2
