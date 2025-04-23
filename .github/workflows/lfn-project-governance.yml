@@ -79,13 +79,20 @@ permissions:
   issues: write           # Needed to create/update governance summary issues
   pull-requests: write    # Often needed by actions interacting with PRs (can potentially be reduced)
   id-token: write         # Needed if using OIDC for authentication (e.g., with external services, not currently used here but good practice if needed later)
-  actions: write          # Added: Needed for gh artifact upload
+  actions: write          # Needed for gh artifact upload
 
 # Environment variables available to all jobs in the workflow
 env:
   # Sets the GitHub token for all jobs. Using a specific LFN Admin Token for potentially elevated permissions if required across orgs.
-  # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings.
+  # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings and has appropriate scopes (e.g., 'repo').
   GITHUB_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
+  PROJECT_CONFIG_PATH: '.lfn/projects.yaml'
+  # --- PATH UPDATED ---
+  CLASSIFY_CONFIG_PATH: '.lfn/classify-config.yml' # Path to the classification rules
+  ISSUES_CONFIG_PATH: '.lfn/issues-config.yml' # Path to issue templates
+  CLASSIFY_ACTION_PATH: './classify-config' # Path to the local JS action directory
+  GOVERNANCE_ISSUE_TITLE: "Quarterly LFN Governance & Lifecycle Review" # Standard title for created issues
+
 
 jobs:
   # =============================================================================
@@ -132,10 +139,11 @@ jobs:
             org_list+=("$PROJECT_ORG")
             echo "Processing single org (Induction): $PROJECT_ORG" >&2
           else
-            if [[ ! -f ".lfn/projects.yaml" ]]; then echo "ERROR: .lfn/projects.yaml not found!" >&2; exit 1; fi
+            # Use the env var for the projects config path
+            if [[ ! -f "${{ env.PROJECT_CONFIG_PATH }}" ]]; then echo "ERROR: ${{ env.PROJECT_CONFIG_PATH }} not found!" >&2; exit 1; fi
             # Read orgs into the bash array using yq and mapfile
-            mapfile -t org_list < <(yq -r '.orgs[] // ""' .lfn/projects.yaml | grep -v '^$' ) # Read orgs, filter empty lines
-            echo "Read ${#org_list[@]} orgs from .lfn/projects.yaml" >&2
+            mapfile -t org_list < <(yq -r '.orgs[] // ""' "${{ env.PROJECT_CONFIG_PATH }}" | grep -v '^$' ) # Read orgs, filter empty lines
+            echo "Read ${#org_list[@]} orgs from ${{ env.PROJECT_CONFIG_PATH }}" >&2
           fi
 
           # --- Create Matrix ---
@@ -196,7 +204,8 @@ jobs:
       # Step 2.3: Install dependencies for the local classification action (once per org job).
       - name: Install Action Dependencies (Org ${{ matrix.org }})
         run: npm install
-        working-directory: ${{ github.workspace }}/classify-config
+        # Use the env var for the action path
+        working-directory: ${{ env.CLASSIFY_ACTION_PATH }}
 
       # Step 2.4: Process all repositories within the current organization.
       # This script now includes explicit error checking and debug tracing (set -x).
@@ -206,12 +215,17 @@ jobs:
           # Pass specific repo slug if provided in induction mode, otherwise process all
           INDUCTION_REPO_SLUG: ${{ github.event.inputs.project_repo }}
           MODE: ${{ github.event.inputs.mode || 'review' }}
+          # Pass the config path env var to the script environment
+          CLASSIFY_CONFIG_FILE_PATH: ${{ env.CLASSIFY_CONFIG_PATH }}
+          CLASSIFY_ACTION_DIR: ${{ env.CLASSIFY_ACTION_PATH }}
         run: |
           # Enable command tracing for detailed debugging output
           set -x
 
           current_org="${{ matrix.org }}"
-          config_path=".github/workflows/classify-config.yml" # Relative path within checked out code
+          # Use the env var passed from the job step
+          config_path="$CLASSIFY_CONFIG_FILE_PATH"
+          action_dir="$CLASSIFY_ACTION_DIR"
           repo_processed_count=0
           repo_error_count=0
 
@@ -233,13 +247,19 @@ jobs:
              org_repos+=("$INDUCTION_REPO_SLUG")
           else
              # Otherwise, list all public repos in the org
-             repo_list_json=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>/dev/null)
+             # Capture stdout and stderr, check exit code immediately after
+             repo_list_output=$(GH_TOKEN=${{ env.GITHUB_TOKEN }} gh repo list "$current_org" --limit 1000 --json name --public -q '.' 2>&1)
              gh_exit_code=$?
+             echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
+             echo "gh repo list output: $repo_list_output" >&2 # Log output (contains names or error)
+
              # Check if the 'gh repo list' command failed
              if [[ $gh_exit_code -ne 0 ]]; then
-                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Skipping org."
+                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope) and org existence."
                  exit 1 # Fail the job if repo listing fails
              fi
+             # Extract JSON part if successful (gh outputs only JSON names with -q '.')
+             repo_list_json="$repo_list_output"
              # Check if the list is empty or null
              if [[ -z "$repo_list_json" ]] || [[ "$repo_list_json" == "[]" ]]; then
                  echo "::warning::No public repositories found for '$current_org' or org is inaccessible. Skipping org."
@@ -298,10 +318,11 @@ jobs:
               echo "Running classification script for $repo_slug..." >&2
               # Execute the Node.js script directly, capture exit code
               # Added || true to prevent immediate exit if node fails, rely on exit code check
+              # Pass the config path from the environment variable
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
               GITHUB_TOKEN="${{ env.GITHUB_TOKEN }}" \
-              node "${{ github.workspace }}/classify-config/index.js" || true
+              node "${action_dir}/index.js" || true # Use action_dir variable
               node_exit_code=$?
 
               # Check exit code explicitly
@@ -311,9 +332,9 @@ jobs:
                  repo_failed=true
                  # Create error JSON
                  printf '{"phase": "%s", "error": "Classification script failed", "exit_code": %s}\n' "$phase_value" "$node_exit_code" > "$result_json_path"
-              # Check if script produced output file as expected
-              elif [[ -f "${{ github.workspace }}/repo.json" ]]; then
-                 mv "${{ github.workspace }}/repo.json" "$result_json_path"
+              # Check if script produced output file as expected (it should be in the current dir, not workspace)
+              elif [[ -f "repo.json" ]]; then # Check for repo.json in the current directory
+                 mv "repo.json" "$result_json_path" # Move the output file
                  echo "Classification script ran, result moved to $result_json_path" >&2
                  # Read phase, handle read errors
                  phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
@@ -544,13 +565,13 @@ jobs:
             }
 
       # Step 3.4: Optional Slack Notification
-      - name: Notify Slack (optional)
-        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": ":clipboard: LFN governance summary updated for *${{ github.repository }}* – <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #- name: Notify Slack (optional)
+      #  if: ${{ env.SLACK_WEBHOOK_URL != '' }}
+      #  uses: slackapi/slack-github-action@v1.24.0
+      #  with:
+      #    payload: |
+      #      {
+      #        "text": ":clipboard: LFN governance summary updated for *${{ github.repository }}* – <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
+      #      }
+      #  env:
+      #    SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
