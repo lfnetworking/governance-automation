@@ -223,8 +223,9 @@ jobs:
           # Explicitly set GH_TOKEN for gh CLI (uses LFN_ADMIN_TOKEN)
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
         run: |
-          # Re-enable strict error checking
-          set -euo pipefail
+          # Temporarily disable strict error checking for debugging
+          # set -euo pipefail
+          set -o pipefail # Keep pipefail to catch pipeline errors
           # set -x # Uncomment for extreme debugging
 
           current_org="${{ matrix.org }}"
@@ -233,15 +234,24 @@ jobs:
           results_dir="./classification-results" # Directory to store results
           repo_processed_count=0
           repo_error_count=0
+          overall_exit_code=0 # Track if any step fails
 
           # Create results directory
-          mkdir -p "$results_dir" # Error handled by set -e
+          mkdir -p "$results_dir"
+          if [[ $? -ne 0 ]]; then
+            echo "::error::Failed to create results directory '$results_dir'"
+            exit 1
+          fi
 
           # Check if gh is installed (needed for repo list)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
           # Verify authentication using the provided token (GH_TOKEN takes precedence)
           echo "Verifying gh CLI authentication (using LFN_ADMIN_TOKEN)..." >&2
-          gh auth status # Error handled by set -e
+          gh auth status
+          if [[ $? -ne 0 ]]; then
+            echo "ERROR: gh auth status failed. Check token (LFN_ADMIN_TOKEN) permissions/validity/scopes (needs repo or public_repo)." >&2
+            exit 1
+          fi
           echo "gh CLI authenticated with LFN_ADMIN_TOKEN." >&2
 
           # --- List Repositories for the Current Org ---
@@ -260,13 +270,11 @@ jobs:
              if [[ $gh_exit_code -ne 0 ]]; then
                  echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code."
                  echo "gh repo list output on error: $repo_list_output" >&2
-                 # Exit non-zero to fail the job if listing fails
                  exit 1
              fi
              repo_list_json="$repo_list_output"
              if echo "$repo_list_json" | jq -e '. == null or length == 0' > /dev/null; then
                  echo "::warning::No public repositories found for '$current_org' or org is inaccessible. Skipping org."
-                 # Exit zero because no repos is not a failure of the script itself
                  exit 0
              fi
              # Use temporary file for mapfile input to handle potential large outputs safely
@@ -297,13 +305,15 @@ jobs:
             repo_failed=false
 
             # Clean up from previous iteration (only target repo dir)
-            # Allow rm to fail without exiting script using || true
-            rm -rf "$target_repo_path" || echo "::warning::Failed to remove $target_repo_path (continuing)"
+            rm -rf "$target_repo_path"
+            rm_exit_code=$?
+            if [[ $rm_exit_code -ne 0 ]]; then
+                echo "::warning::Failed to remove $target_repo_path (exit code $rm_exit_code, continuing)"
+            fi
 
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
-            # Use a subshell and || true to capture output even on failure with set -e
-            git_output=$( (git clone --depth 1 "https://github-actions:${GH_TOKEN}@github.com/${repo_slug}.git" "$target_repo_path") 2>&1 || true )
+            git_output=$( (git clone --depth 1 "https://github-actions:${GH_TOKEN}@github.com/${repo_slug}.git" "$target_repo_path") 2>&1 )
             git_exit_code=$? # Check the exit code after the command
 
             phase_value="Unknown"
@@ -336,13 +346,26 @@ jobs:
                  printf '{"phase": "%s", "error": "Classification script failed", "exit_code": %s}\n' "$phase_value" "$node_exit_code" > "$result_json_path"
               elif [[ -f "repo.json" ]]; then
                  # Move the generated repo.json to the final destination
-                 mv "repo.json" "$result_json_path" # Error handled by set -e
-                 echo "Classification script ran, result saved to $result_json_path" >&2
-                 phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
-                 if [[ "$phase_value" == "Read Error" ]]; then
-                    echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
+                 echo "DEBUG: Moving repo.json to $result_json_path"
+                 mv "repo.json" "$result_json_path"
+                 mv_exit_code=$?
+                 if [[ $mv_exit_code -ne 0 ]]; then
+                    echo "::error::Failed to move repo.json to $result_json_path (exit code $mv_exit_code)"
                     repo_failed=true
-                    printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
+                    printf '{"phase": "%s", "error": "Failed to move script output"}\n' "Classification Error" > "$result_json_path"
+                 else
+                    echo "Classification script ran, result saved to $result_json_path" >&2
+                    phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null)
+                    jq_exit_code=$?
+                    if [[ $jq_exit_code -ne 0 ]]; then
+                       echo "::warning::jq failed to read phase from $result_json_path (exit code $jq_exit_code)"
+                       phase_value="Read Error" # Treat jq failure as read error
+                    fi
+                    if [[ "$phase_value" == "Read Error" ]] || [[ -z "$phase_value" ]] || [[ "$phase_value" == "null" ]]; then
+                       echo "::error::Failed to read phase or phase was empty/null from generated $result_json_path for $repo_slug"
+                       repo_failed=true
+                       printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "Read Error" > "$result_json_path"
+                    fi
                  fi
               else
                  echo "::error::Classification script completed successfully but did not produce repo.json for $repo_slug"
@@ -353,23 +376,58 @@ jobs:
             fi # end if checkout_successful
 
             echo "Final phase for $repo_slug: $phase_value" >&2
+            echo "DEBUG: Just logged final phase."
 
             # --- Artifact Upload moved to separate step ---
 
-            # Increment counters (No error check needed)
+            # Increment counters
+            echo "DEBUG: Attempting to increment repo_processed_count..."
             ((repo_processed_count++))
+            inc_exit_code=$?
+            echo "DEBUG: repo_processed_count increment exit code: $inc_exit_code"
+            if [[ $inc_exit_code -ne 0 ]]; then
+               echo "::error::Failed to increment repo_processed_count! Exit code: $inc_exit_code"
+               overall_exit_code=1 # Track that an error occurred
+            fi
+            echo "DEBUG: repo_processed_count is now $repo_processed_count"
+
+
             if [[ "$repo_failed" == true ]]; then
+               echo "DEBUG: Incrementing repo_error_count..."
                ((repo_error_count++))
+               inc_err_exit_code=$?
+               echo "DEBUG: repo_error_count increment exit code: $inc_err_exit_code"
+               if [[ $inc_err_exit_code -ne 0 ]]; then
+                  echo "::error::Failed to increment repo_error_count! Exit code: $inc_err_exit_code"
+                  overall_exit_code=1 # Track that an error occurred
+               fi
+               echo "DEBUG: repo_error_count is now $repo_error_count"
                # Ensure an error file exists if repo failed before file creation
                if [[ ! -f "$result_json_path" ]]; then
+                  echo "DEBUG: Creating placeholder error file..."
                   printf '{"phase": "Error", "error": "Processing failed before result generation"}\n' > "$result_json_path"
+                  printf_exit_code=$?
+                  if [[ $printf_exit_code -ne 0 ]]; then
+                     echo "::error::Failed write placeholder error file with exit code $printf_exit_code"
+                     overall_exit_code=1 # Track that an error occurred
+                  fi
+                  echo "DEBUG: Placeholder error file created."
                fi
             fi
+            echo "DEBUG: Finished repo_failed check."
 
             # Clean up repo clone for next iteration
-            # Allow rm to fail without exiting script using || true
-            rm -rf "$target_repo_path" || echo "::warning::Failed to remove $target_repo_path (continuing)"
+            echo "DEBUG: Removing target repo path: $target_repo_path"
+            rm -rf "$target_repo_path"
+            rm_exit_code=$?
+            if [[ $rm_exit_code -ne 0 ]]; then
+               echo "::warning::Failed to remove $target_repo_path (exit code $rm_exit_code)"
+               # Do not set overall_exit_code=1 here, as it's just a warning
+            fi
+            echo "DEBUG: Target repo path removal attempted."
+
             echo "--- Finished processing repository: $repo_slug ---" >&2
+            echo "DEBUG: End of loop iteration for $repo_slug."
 
           done # End of loop through repos for the org
 
@@ -378,13 +436,17 @@ jobs:
           # Decide if the job should fail if any repo had an error
           if [[ $repo_error_count -gt 0 ]]; then
             echo "::error::Encountered $repo_error_count errors while processing repositories for $current_org."
-            # exit 1 # Uncomment this line to make the whole org job fail if any repo fails
+            # exit 1 # Keep this commented out to allow artifact upload even with errors
           fi
+
+          # Exit with overall status
+          echo "DEBUG: Exiting script with code $overall_exit_code"
+          exit $overall_exit_code
 
       # Step 2.5: Upload all generated result files as a single artifact for this org job
       - name: Upload Classification Artifacts for Org ${{ matrix.org }}
         uses: actions/upload-artifact@v4
-        if: always() # Upload even if some repos failed
+        if: always() # Upload even if some repos failed or script exited non-zero
         with:
           name: classification-results-${{ matrix.org }} # Artifact name includes the org
           path: classification-results/ # Upload the contents of the results directory
