@@ -79,12 +79,12 @@ permissions:
   issues: write           # Needed to create/update governance summary issues
   pull-requests: write    # Often needed by actions interacting with PRs (can potentially be reduced)
   id-token: write         # Needed if using OIDC for authentication (e.g., with external services, not currently used here but good practice if needed later)
-  actions: write          # Needed for gh artifact upload (grants permission to the default GITHUB_TOKEN)
+  actions: write          # Needed for actions/upload-artifact
 
 # Environment variables available to all jobs in the workflow
 env:
   # Sets the GitHub token for all jobs. Using a specific LFN Admin Token for potentially elevated permissions if required across orgs.
-  # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings and has appropriate scopes (e.g., 'repo', 'actions:write').
+  # Ensure this secret (LFN_ADMIN_TOKEN) is configured in the repository/organization settings and has appropriate scopes (e.g., 'repo').
   GITHUB_TOKEN: ${{ secrets.LFN_ADMIN_TOKEN }}
   PROJECT_CONFIG_PATH: '.lfn/projects.yaml'
   # --- PATH UPDATED ---
@@ -177,7 +177,8 @@ jobs:
   #          - Lists all repositories within the current organization.
   #          - Loops through each repository slug.
   #          - For each repo: Clones it, runs the classification Node.js script directly,
-  #            uploads the result artifact using GitHub CLI (using default token). Handles errors per repo.
+  #            saves the result to a uniquely named file in a results directory.
+  #          - After the loop, uses actions/upload-artifact to upload all results.
   # =============================================================================
   classify:
     needs: enumerate-projects # Depends on the 'enumerate-projects' job
@@ -208,8 +209,9 @@ jobs:
         working-directory: ${{ env.CLASSIFY_ACTION_PATH }}
 
       # Step 2.4: Process all repositories within the current organization.
-      # This script now includes explicit error checking.
+      # This script now includes explicit error checking and saves results locally.
       - name: Process Repositories for Org ${{ matrix.org }}
+        id: process-repos # Give step an ID
         shell: bash
         env:
           # Pass specific repo slug if provided in induction mode, otherwise process all
@@ -218,148 +220,122 @@ jobs:
           # Pass the config path env var to the script environment
           CLASSIFY_CONFIG_FILE_PATH: ${{ env.CLASSIFY_CONFIG_PATH }}
           CLASSIFY_ACTION_DIR: ${{ env.CLASSIFY_ACTION_PATH }}
-          # Explicitly set GH_TOKEN for gh CLI commands needing the PAT
+          # Explicitly set GH_TOKEN for gh CLI (uses LFN_ADMIN_TOKEN)
           GH_TOKEN: ${{ env.GITHUB_TOKEN }}
-          # Make the default GITHUB_TOKEN available for artifact upload
-          DEFAULT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Enable strict error checking
           set -euo pipefail
           # set -x # Uncomment for extreme debugging
 
           current_org="${{ matrix.org }}"
-          # Use the env var passed from the job step
           config_path="$CLASSIFY_CONFIG_FILE_PATH"
           action_dir="$CLASSIFY_ACTION_DIR"
+          results_dir="./classification-results" # Directory to store results
           repo_processed_count=0
           repo_error_count=0
 
-          # Check if gh is installed (needed for repo list and artifact upload)
+          # Create results directory
+          mkdir -p "$results_dir"
+
+          # Check if gh is installed (needed for repo list)
           if ! command -v gh &> /dev/null; then echo "ERROR: gh cli not found." >&2; exit 1; fi
           # Verify authentication using the provided token (GH_TOKEN takes precedence)
           echo "Verifying gh CLI authentication (using LFN_ADMIN_TOKEN)..." >&2
-          # Use GH_TOKEN explicitly for auth status check
           gh auth status || { echo "ERROR: gh auth status failed. Check token (LFN_ADMIN_TOKEN) permissions/validity/scopes (needs repo or public_repo)." >&2; exit 1; }
           echo "gh CLI authenticated with LFN_ADMIN_TOKEN." >&2
-
 
           # --- List Repositories for the Current Org ---
           declare -a org_repos
           echo "Listing repositories for organization: $current_org..." >&2
 
-          # If in induction mode AND a specific repo was given, only process that one
           if [[ "$MODE" == "induction" ]] && [[ -n "$INDUCTION_REPO_SLUG" ]] && [[ "$INDUCTION_REPO_SLUG" == "$current_org/"* ]]; then
              echo "Induction mode with specific repo: $INDUCTION_REPO_SLUG" >&2
              org_repos+=("$INDUCTION_REPO_SLUG")
           else
-             # Otherwise, list all public repos in the org
-             # Use --visibility=public instead of deprecated --public
-             # Capture stdout only (stderr goes to runner log), check exit code immediately after
              echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --visibility=public -q '.'" >&2
-             # Use GH_TOKEN explicitly for the command
              repo_list_output=$(gh repo list "$current_org" --limit 1000 --json name --visibility=public -q '.' 2>&1)
              gh_exit_code=$?
-             echo "gh repo list exit code: $gh_exit_code" >&2 # Log exit code
+             echo "gh repo list exit code: $gh_exit_code" >&2
 
-             # Check if the 'gh repo list' command failed
              if [[ $gh_exit_code -ne 0 ]]; then
-                 # Log the captured stderr from the command if it failed
-                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code. Check token permissions (needs 'repo' or 'public_repo' scope), org existence, and org access control settings (e.g., SAML SSO authorization for the token)."
-                 # It's better to log the actual error output if available
+                 echo "::error::Failed to list repos for '$current_org'. gh exit code: $gh_exit_code."
                  echo "gh repo list output on error: $repo_list_output" >&2
-                 exit 1 # Fail the job if repo listing fails
+                 exit 1
              fi
-
-             # Assign the potentially clean JSON output
              repo_list_json="$repo_list_output"
-             # Check if the list is empty or null (JSON check)
-             # Use jq to check if the result is an empty array or null
              if echo "$repo_list_json" | jq -e '. == null or length == 0' > /dev/null; then
                  echo "::warning::No public repositories found for '$current_org' or org is inaccessible. Skipping org."
-                 exit 0 # Exit successfully, nothing to process for this org
+                 exit 0
              fi
-             # Populate the array with <org>/<repo> slugs
-             # This jq command should now work reliably as the input is clean JSON
              mapfile -t org_repos < <(echo "$repo_list_json" | jq -r '.[].name' | sed "s|^|$current_org/|")
           fi
 
           echo "Found ${#org_repos[@]} repositories to process for $current_org." >&2
           if [ ${#org_repos[@]} -eq 0 ]; then
              echo "No repositories to process for $current_org." >&2
-             exit 0 # Exit successfully
+             exit 0
           fi
 
           # --- Loop Through Repositories in this Org ---
           for repo_slug in "${org_repos[@]}"; do
-            if [[ -z "$repo_slug" ]]; then continue; fi # Safety check
+            if [[ -z "$repo_slug" ]]; then continue; fi
 
-            echo # Add blank line for readability
+            echo
             echo "--- Processing repository: $repo_slug ---" >&2
-            target_repo_path="./repo_temp" # Temporary checkout path
-            result_json_path="./repo_result.json" # Temporary result file path
-            safe_name=$(echo "$repo_slug" | sed 's|/|--|g') # Sanitize name for artifact
-            artifact_name="${safe_name}.json"
-            repo_failed=false # Flag for this specific repo
+            target_repo_path="./repo_temp"
+            safe_name=$(echo "$repo_slug" | sed 's|/|--|g')
+            # Save result directly to the results directory with the final name
+            result_json_path="${results_dir}/${safe_name}.json"
+            repo_failed=false
 
-            # Clean up from previous iteration
-            rm -f "$result_json_path"
+            # Clean up from previous iteration (only target repo dir)
             rm -rf "$target_repo_path"
 
             # --- Checkout target repo ---
             echo "Cloning $repo_slug..." >&2
-            # Capture output AND exit code separately
-            # Use GH_TOKEN for authentication within the URL
             git_output=$(git clone --depth 1 "https://github-actions:${GH_TOKEN}@github.com/${repo_slug}.git" "$target_repo_path" 2>&1)
             git_exit_code=$?
 
             phase_value="Unknown"
             checkout_successful=false
-            # Check exit code explicitly
             if [[ $git_exit_code -eq 0 ]]; then
               echo "Clone successful." >&2
               checkout_successful=true
             else
               echo "::error::Failed to clone $repo_slug. Exit code: $git_exit_code."
-              echo "Git Output: $git_output" # Log git output on error
+              echo "Git Output: $git_output"
               phase_value="Checkout Failed"
-              repo_failed=true # Mark repo as failed
-              # Create result JSON for checkout failure
+              repo_failed=true
               printf '{"phase": "%s", "error": "Checkout failed", "details": "%s"}\n' "$phase_value" "$(echo "$git_output" | jq -Rsa .)" > "$result_json_path"
             fi
 
             # --- Run Classification Script ---
             if [[ "$checkout_successful" == true ]]; then
               echo "Running classification script for $repo_slug..." >&2
-              # Execute the Node.js script directly, capture exit code
-              # Pass the config path from the environment variable
-              # Ensure GITHUB_TOKEN is explicitly passed to the script's environment (Node script uses GITHUB_TOKEN)
+              # Run node script, save output to temporary file first
+              temp_node_output="node_output.json"
               INPUT_REPO="$repo_slug" \
               INPUT_CONFIG_PATH="$config_path" \
               GITHUB_TOKEN="${GH_TOKEN}" \
-              node "${action_dir}/index.js"
+              node "${action_dir}/index.js" # This script should write repo.json
               node_exit_code=$?
 
-              # Check exit code explicitly
               if [[ $node_exit_code -ne 0 ]]; then
                  echo "::error::Classification script failed for $repo_slug with exit code $node_exit_code."
                  phase_value="Classification Error"
                  repo_failed=true
-                 # Create error JSON
                  printf '{"phase": "%s", "error": "Classification script failed", "exit_code": %s}\n' "$phase_value" "$node_exit_code" > "$result_json_path"
-              # Check if script produced output file as expected (it should be in the current dir, not workspace)
-              elif [[ -f "repo.json" ]]; then # Check for repo.json in the current directory
-                 mv "repo.json" "$result_json_path" # Move the output file
-                 echo "Classification script ran, result moved to $result_json_path" >&2
-                 # Read phase, handle read errors
+              elif [[ -f "repo.json" ]]; then
+                 # Move the generated repo.json to the final destination
+                 mv "repo.json" "$result_json_path"
+                 echo "Classification script ran, result saved to $result_json_path" >&2
                  phase_value=$(jq -r '.phase // "Unknown"' "$result_json_path" 2>/dev/null || echo "Read Error")
                  if [[ "$phase_value" == "Read Error" ]]; then
                     echo "::error::Failed to read phase from generated $result_json_path for $repo_slug"
                     repo_failed=true
-                    # Overwrite result file with read error info
                     printf '{"phase": "%s", "error": "Failed to read phase from script output"}\n' "$phase_value" > "$result_json_path"
                  fi
               else
-                 # This case means node script succeeded (exit 0) but didn't create the file
                  echo "::error::Classification script completed successfully but did not produce repo.json for $repo_slug"
                  phase_value="Classification Error"
                  repo_failed=true
@@ -369,31 +345,7 @@ jobs:
 
             echo "Final phase for $repo_slug: $phase_value" >&2
 
-            # --- Upload Artifact ---
-            # Ensure result file exists before uploading
-            if [[ ! -f "$result_json_path" ]]; then
-               echo "::error::Result file $result_json_path not found for $repo_slug. Cannot upload artifact."
-               repo_failed=true
-               # Create a placeholder artifact if needed by publish-report
-               printf '{"phase": "Error", "error": "Result file missing before upload"}\n' > "$result_json_path"
-               # Use DEFAULT_GITHUB_TOKEN explicitly for artifact upload, capture output
-               upload_output=$(GH_TOKEN=${DEFAULT_GITHUB_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
-               gh_artifact_exit_code=$? # Still capture exit code
-               echo "::error::Placeholder artifact upload attempted for missing file. Exit code: $gh_artifact_exit_code. Output: $upload_output"
-            else
-               echo "Uploading artifact $artifact_name..." >&2
-               # Use DEFAULT_GITHUB_TOKEN explicitly for artifact upload, capture output
-               upload_output=$(GH_TOKEN=${DEFAULT_GITHUB_TOKEN} gh artifact upload "$result_json_path" --name "$artifact_name" 2>&1)
-               gh_artifact_exit_code=$?
-               # Check exit code explicitly
-               if [[ $gh_artifact_exit_code -ne 0 ]]; then
-                 echo "::error::Failed to upload artifact $artifact_name for $repo_slug. gh exit code: $gh_artifact_exit_code."
-                 echo "gh artifact upload output: $upload_output" # Log output on error
-                 repo_failed=true # Mark repo as failed if upload fails
-               else
-                 echo "Artifact $artifact_name uploaded successfully." >&2
-               fi
-            fi
+            # --- Artifact Upload moved to separate step ---
 
             # Increment counters
             ((repo_processed_count++))
@@ -401,13 +353,9 @@ jobs:
                ((repo_error_count++))
             fi
 
-            # Clean up for next repo
-            rm -f "$result_json_path"
+            # Clean up repo clone for next iteration
             rm -rf "$target_repo_path"
             echo "--- Finished processing repository: $repo_slug ---" >&2
-
-            # Optional: Add a small delay to avoid hitting API rate limits too quickly
-            # sleep 1
 
           done # End of loop through repos for the org
 
@@ -419,13 +367,22 @@ jobs:
             # exit 1 # Uncomment this line to make the whole org job fail if any repo fails
           fi
 
+      # Step 2.5: Upload all generated result files as a single artifact for this org job
+      - name: Upload Classification Artifacts for Org ${{ matrix.org }}
+        uses: actions/upload-artifact@v4
+        if: always() # Upload even if some repos failed
+        with:
+          name: classification-results-${{ matrix.org }} # Artifact name includes the org
+          path: classification-results/ # Upload the contents of the results directory
+          retention-days: 5 # Optional: Adjust retention
+
 
   # =============================================================================
   # JOB 3: Publish Report
   # PURPOSE: Aggregates the classification results from all repositories (across
   #          all orgs), generates a Markdown summary report, and posts/updates
   #          that report as a GitHub issue in the main governance-automation repository.
-  # INPUT:   Artifacts uploaded by the 'classify' job instances (one per repo).
+  # INPUT:   Artifacts uploaded by the 'classify' job instances (one per org).
   # PROCESS: - Downloads all artifacts.
   #          - Parses each downloaded JSON file to get the repo and phase.
   #          - Builds the Markdown report ('summary.md') as before.
@@ -438,10 +395,11 @@ jobs:
     if: always() # Run even if some classify jobs failed
     steps:
       # Step 3.1: Download all artifacts produced by the 'classify' jobs.
+      # Each artifact contains results for one org.
       - name: Download classification artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts # Download all available artifacts
+          path: artifacts # Download all artifacts into subdirectories here
 
       # Step 3.2: Build the Markdown Summary Report.
       - name: Build Markdown Report
@@ -465,7 +423,8 @@ jobs:
               echo "" >> summary.md
               echo "*No artifacts found. Check 'classify' job logs for errors (e.g., artifact upload failures).*" >> summary.md
           else
-              # Find all downloaded JSON files (*.json) inside the artifact directories (e.g., artifacts/org--repo.json/*.json)
+              # Find all downloaded JSON files (*.json) inside the artifact subdirectories
+              # Structure is artifacts/classification-results-<org-name>/org--repo.json
               while IFS= read -r -d $'\0' file; do
                 # Check if the found item is actually a file before processing
                 if [[ ! -f "$file" ]]; then
@@ -473,16 +432,9 @@ jobs:
                     continue
                 fi
 
-                dir=$(dirname "$file") # Directory is artifacts/org--repo.json
-                artifact_name_with_ext=$(basename "$dir") # org--repo.json
-                # Handle cases where artifact name might not have .json (though it should)
-                if [[ "$artifact_name_with_ext" == *.json ]]; then
-                    artifact_name=${artifact_name_with_ext%.json} # org--repo
-                else
-                    artifact_name=$artifact_name_with_ext
-                    echo "Warning: Artifact directory name '$artifact_name_with_ext' did not end in .json" >&2
-                fi
-
+                # Extract org--repo from filename
+                artifact_name_with_ext=$(basename "$file") # org--repo.json
+                artifact_name=${artifact_name_with_ext%.json} # org--repo
 
                 full=${artifact_name//--/\/}
                 project=${full%%/*}
@@ -511,8 +463,8 @@ jobs:
                 else
                   rows_data[$project]+=$'\n'"$row_line"
                 fi
-              # Find *.json files exactly two levels deep (artifacts/<artifact_name>/result.json)
-              done < <(find artifacts -mindepth 2 -maxdepth 2 -name '*.json' -print0)
+              # Find *.json files within any subdirectory of artifacts/
+              done < <(find artifacts -mindepth 2 -name '*.json' -print0)
 
 
               if [ ${#rows_data[@]} -eq 0 ]; then
