@@ -250,7 +250,12 @@ jobs:
 
           if [[ "$MODE" == "induction" ]] && [[ -n "$INDUCTION_REPO_SLUG" ]] && [[ "$INDUCTION_REPO_SLUG" == "$current_org/"* ]]; then
              echo "Induction mode with specific repo: $INDUCTION_REPO_SLUG" >&2
-             org_repos+=("$INDUCTION_REPO_SLUG")
+             # Check if the induction repo name contains 'archived'
+             if [[ "$INDUCTION_REPO_SLUG" != *archived* ]]; then
+                org_repos+=("$INDUCTION_REPO_SLUG")
+             else
+                echo "Skipping induction repo as it contains 'archived': $INDUCTION_REPO_SLUG" >&2
+             fi
           else
              echo "Attempting: gh repo list \"$current_org\" --limit 1000 --json name --visibility=public -q '.'" >&2
              repo_list_output=$(gh repo list "$current_org" --limit 1000 --json name --visibility=public -q '.' 2>&1)
@@ -269,8 +274,8 @@ jobs:
                  # Exit zero because no repos is not a failure of the script itself
                  exit 0
              fi
-             # Use temporary file for mapfile input to handle potential large outputs safely
-             jq -r '.[].name' <<< "$repo_list_json" > repo_names.tmp
+             # Use temporary file for mapfile input, filter out archived repos, and prepend org name
+             jq -r '.[].name' <<< "$repo_list_json" | grep -vi 'archived' > repo_names.tmp
              mapfile -t repo_names_array < repo_names.tmp
              rm repo_names.tmp
              for name in "${repo_names_array[@]}"; do
@@ -278,9 +283,9 @@ jobs:
              done
           fi
 
-          echo "Found ${#org_repos[@]} repositories to process for $current_org." >&2
+          echo "Found ${#org_repos[@]} repositories to process for $current_org (after filtering 'archived')." >&2
           if [ ${#org_repos[@]} -eq 0 ]; then
-             echo "No repositories to process for $current_org." >&2
+             echo "No repositories to process for $current_org after filtering." >&2
              exit 0
           fi
 
