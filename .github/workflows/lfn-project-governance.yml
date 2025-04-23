@@ -91,7 +91,7 @@ env:
   CLASSIFY_CONFIG_PATH: '.lfn/classify-config.yml' # Path to the classification rules
   ISSUES_CONFIG_PATH: '.lfn/issues-config.yml' # Path to issue templates
   CLASSIFY_ACTION_PATH: './classify-config' # Path to the local JS action directory
-  GOVERNANCE_ISSUE_TITLE: "Quarterly LFN Project Governance & Lifecycle Review" # Standard title for created issues
+  GOVERNANCE_ISSUE_TITLE: "Quarterly LFN Governance & Lifecycle Review" # Standard title for created issues
 
 
 jobs:
@@ -132,12 +132,7 @@ jobs:
           # set -x # Uncomment for extreme debugging
 
           declare -a org_list
-          declare all_repo_slugs_string="" # Temporary string to hold all slugs
-          temp_slug_file="temp_slugs.txt" # Temporary file name
-
-          # Ensure temp file does not exist from previous runs
-          rm -f "$temp_slug_file"
-          touch "$temp_slug_file" # Create empty file
+          declare -a repo_slug_list
 
           # --- Determine Target Orgs ---
           if [[ "$MODE" == "induction" ]]; then
@@ -151,11 +146,11 @@ jobs:
               fi
               # Check if the specified repo name contains 'archived'
               repo_name_only=$(basename "$PROJECT_REPO")
-              if [[ "$repo_name_only" == *archived* ]] || [[ "$repo_name_only" == *Archived* ]]; then # Case-insensitive check
+              if [[ "$repo_name_only" == *archived* ]]; then
                  echo "::warning::Skipping induction repo as its name contains 'archived': $PROJECT_REPO" >&2
+                 repo_slug_list=() # Ensure list is empty
               else
-                 # Write directly to temp file
-                 printf '%s\n' "$PROJECT_REPO" >> "$temp_slug_file"
+                 repo_slug_list+=("$PROJECT_REPO")
               fi
               # Skip org listing below if specific repo is given
               org_list=()
@@ -185,44 +180,33 @@ jobs:
              for org in "${org_list[@]}"; do
                 echo "Listing repos for: $org" >&2
                 # List repos, get names, filter out archived, prepend org name
-                # Append directly to the temp file
                 gh repo list "$org" --limit 1000 --json name --visibility=public -q '.' \
                    | jq -r '.[].name' \
                    | grep -vi 'archived' \
                    | sed "s|^|$org/|" \
-                   | while IFS= read -r repo_slug_line; do printf '%s\n' "$repo_slug_line" >> "$temp_slug_file"; done
+                   | while IFS= read -r repo_slug; do repo_slug_list+=("$repo_slug"); done
                 # Check pipe status if needed, though set -o pipefail should handle it
              done
           fi
 
-          # Populate the final array from the temp file
-          declare -a repo_slug_list
-          mapfile -t repo_slug_list < <(cat "$temp_slug_file" | grep -v '^$') # Read non-empty lines into the array
-          rm "$temp_slug_file"
-          # repo_slug_list is now populated or empty
-
           # --- Create Matrix ---
-          total_repos=${#repo_slug_list[@]} # Access the length safely now
+          total_repos=${#repo_slug_list[@]}
           echo "Total repositories to process: $total_repos" >&2
-
           if [ $total_repos -eq 0 ]; then
-             echo "::warning::No repositories found to process after filtering."
-             # Explicitly set empty matrix if no repos found
-             final_matrix_json="{\"include\":[]}"
-          else
-             # Prepare the 'include' array for the matrix only if repos exist
-             matrix_include_json=$(printf '%s\n' "${repo_slug_list[@]}" | jq -R '{repo_slug: .}' | jq -sc .)
-             # Final matrix object structure
-             final_matrix_json="{\"include\":${matrix_include_json}}"
+            echo "::warning::No repositories found to process after filtering."
+            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+            exit 0 # Exit successfully but with empty matrix
           fi
+
+          # Prepare the 'include' array for the matrix: [ {"repo_slug": "org1/repoA"}, {"repo_slug": "org1/repoB"}, ... ]
+          matrix_include_json=$(printf '%s\n' "${repo_slug_list[@]}" | jq -R '{repo_slug: .}' | jq -sc .)
+
+          # Final matrix object structure: { "include": [ { "repo_slug": "org1/repoA" }, ... ] }
+          final_matrix_json="{\"include\":${matrix_include_json}}"
 
           echo "matrix=${final_matrix_json}" >> "$GITHUB_OUTPUT"
           echo "Generated matrix for $total_repos repositories." >&2
-          if [ $total_repos -gt 0 ]; then
-             echo "Matrix structure preview: $(echo $final_matrix_json | jq -c . | cut -c 1-200)..." >&2
-          else
-             echo "Matrix is empty." >&2
-          fi
+          echo "Matrix structure preview: $(echo $final_matrix_json | jq -c . | cut -c 1-200)..." >&2
 
 
   # =============================================================================
@@ -284,8 +268,8 @@ jobs:
           repo_slug="$REPO_SLUG"
           config_path="$CLASSIFY_CONFIG_FILE_PATH"
           action_dir="$CLASSIFY_ACTION_DIR"
-          # Use a simpler name for the results directory, job runner ensures isolation
-          results_dir="./classification-result"
+          # Create a unique results directory for this job instance to avoid conflicts
+          results_dir="./classification-result-${repo_slug//\//--}"
           mkdir -p "$results_dir"
 
           target_repo_path="./repo_temp" # Local path for cloning
@@ -365,12 +349,10 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always() # Upload result even if script failed
         with:
-          # Create a unique artifact name for each repo result using a safe version of the slug
-          # Replace / with -- for artifact name compatibility
+          # Create a unique artifact name for each repo result
           name: result-${{ matrix.repo_slug }}
-          # Path to the specific JSON file created in the previous step
-          # Use the safe_name variable which was already calculated
-          path: ./classification-result/$(echo "${{ matrix.repo_slug }}" | sed 's|/|--|g').json
+          # Path to the unique results directory created in the previous step
+          path: ./classification-result-${{ matrix.repo_slug }}/*.json
           retention-days: 5 # Optional: Adjust retention
 
 
