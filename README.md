@@ -26,14 +26,14 @@ A GitHub Actions workflow runs automatically **every Monday at 09:00 UTC** (and 
 * **Workflow Definition:** [`.github/workflows/lfn-project-governance.yml`](./.github/workflows/lfn-project-governance.yml) - Defines the jobs, steps, triggers, and permissions for the GitHub Actions workflow.
 * **Project List:** [`./.lfn/projects.yaml`](./.lfn/projects.yaml) - A simple list of LFN GitHub organization names whose repositories should be included in the analysis.
 * **Classification Logic:** [`./classify-config/`](./classify-config/) - Contains the custom JavaScript GitHub Action (`index.js`) that fetches repository metrics via the GitHub API and applies the classification rules.
-* **Classification Rules:** [`./.github/workflows/classify-config.yml`](./.github/workflows/classify-config.yml) - Defines the specific metrics and thresholds used to determine the lifecycle phase for each repository. This file is intended to be updated based on LFN TAC decisions.
-* **Guidance Issue Templates:** [`./.github/workflows/issues-config.yml`](./.github/workflows/issues-config.yml) - **(Future Use)** Defines customizable templates (title, body, labels, assignees) for the *optional* phase-specific guidance issues that can be automatically created in each project's repository. This allows tailoring the automated feedback provided to projects based on their classified phase.
+* **Classification Rules:** [`./.lfn/classify-config.yml`](./.lfn/classify-config.yml) - Defines the specific metrics and thresholds used to determine the lifecycle phase for each repository. This file is intended to be updated based on LFN TAC decisions.
+* **Guidance Issue Templates:** [`./.lfn/issues-config.yml`](./.lfn/issues-config.yml) - **(Future Use)** Defines customizable templates (title, body, labels, assignees) for the *optional* phase-specific guidance issues that can be automatically created in each project's repository. This allows tailoring the automated feedback provided to projects based on their classified phase.
 
 ## Configuration & Requirements
 
 * **Organizations:** To add or remove an LFN project (organization) from the scan, update the list in [`./.lfn/projects.yaml`](./.lfn/projects.yaml).
-* **Lifecycle Rules:** To adjust the metrics or thresholds for lifecycle phases, modify [`./.github/workflows/classify-config.yml`](./.github/workflows/classify-config.yml). Changes should reflect decisions made by the LFN TAC.
-* **Guidance Issues:** To customize the content of the optional, phase-specific issues created in project repositories (when this feature is enabled), modify [`./.github/workflows/issues-config.yml`](./.github/workflows/issues-config.yml).
+* **Lifecycle Rules:** To adjust the metrics or thresholds for lifecycle phases, modify [`./.lfn/classify-config.yml`](./.lfn/classify-config.yml). Changes should reflect decisions made by the LFN TAC.
+* **Guidance Issues:** To customize the content of the optional, phase-specific issues created in project repositories (when this feature is enabled), modify [`./.lfn/issues-config.yml`](./.lfn/issues-config.yml).
 * **Authentication:** The workflow requires a GitHub Personal Access Token (PAT) stored as a repository secret named `LFN_ADMIN_TOKEN`. This token needs sufficient **scopes** to:
     * List public repositories across the configured organizations (`public_repo` or `repo` scope).
     * Read repository metadata (`public_repo` or `repo` scope).
@@ -47,7 +47,7 @@ Contributions and feedback from the LFN community are welcome!
 
 * **Bug Reports & Feature Requests:** Please open an [Issue](https://github.com/lfnetworking/governance-automation/issues).
 * **Code Contributions:** Feel free to fork the repository and submit Pull Requests. Please ensure your changes align with the project's goals and maintain code clarity.
-* **Rule Adjustments:** Changes to the classification rules in [`classify-config.yml`](./.github/workflows/classify-config.yml) should generally follow discussions and decisions within the LFN TAC.
+* **Rule Adjustments:** Changes to the classification rules in [`classify-config.yml`](./.lfn/classify-config.yml) should generally follow discussions and decisions within the LFN TAC.
 
 ---
 
