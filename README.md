@@ -15,7 +15,7 @@ A GitHub Actions workflow runs automatically **every Monday at 09:00 UTC** (and 
     * Release history
     * Repository age
     * Archived status
-3.  **Classifies Lifecycle Phase:** Based on configurable rules defined by the LFN TAC ([`classify-config.yml`](./.github/workflows/classify-config.yml)), it assigns each repository to one of the defined lifecycle phases (e.g., Spark, Incubation, Active, Stable, Maintenance/LTS, Archive).
+3.  **Classifies Lifecycle Phase:** Based on configurable rules defined by the LFN TAC ([`classify-config.yml`](./.lfn/classify-config.yml)), it assigns each repository to one of the defined lifecycle phases (e.g., Spark, Incubation, Active, Stable, Maintenance/LTS, Archive).
 4.  **Generates Report:** Compiles the results for all processed repositories into a Markdown summary.
 5.  **Publishes Summary:** Creates or updates a GitHub Issue within *this* repository ([`lfnetworking/governance-automation`](https://github.com/lfnetworking/governance-automation)) containing the full Markdown summary report. The workflow run summary page also includes this report.
 6.  **(Optional) Notifies Slack:** Sends a notification to a configured Slack channel upon completion.
