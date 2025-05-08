@@ -523,7 +523,7 @@ jobs:
                     # Sort rows and print directly, ensuring correct format
                     printf '%s\n' "${rows_data[$project]}" \
                       | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /^Error|^Unknown|^Checkout Failed|^Classification Error/) print "0"$0; else print "1"$0 }' \
-                      | sort -t'|' -k1,1 -k3,3 -k2,2 \
+                      | sort -t'|' -k1,1 -k2,2 -k3,3 \
                       | sed 's/^.//'
                   done
                 } > summary.md
