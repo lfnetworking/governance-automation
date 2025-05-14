@@ -69,7 +69,7 @@ on:
         required: false # Optional for induction mode
 
   # Schedule the workflow to run automatically
-  schedule:
+  # schedule:
     # Runs at 09:00 UTC every Monday (adjust cron expression as needed)
   #  - cron: "0 9 * * 1"  # Example: 09:00 UTC Monday → 02:00 PT
 
