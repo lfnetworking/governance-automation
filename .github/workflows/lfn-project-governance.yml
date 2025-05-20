@@ -487,7 +487,7 @@ jobs:
                 fi
 
                 # Construct the markdown table row correctly with pipes
-                row_line="| ${repo##*/} | $phase |"
+                [$repo](https://github.com/$project/$repo) | $phase |"
                 if [[ -z "${rows_data[$project]:-}" ]]; then
                   rows_data[$project]="$row_line"
                 else
